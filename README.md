@@ -32,6 +32,19 @@ docker run -d \
   tictacguy/kith:latest
 ```
 
+### GitHub Container Registry
+
+```bash
+docker run -d \
+  --name kith \
+  -p 8000:8000 \
+  -v kith_data:/data/kith \
+  -e KITH_LLM_BACKEND=openai \
+  -e OPENAI_API_KEY=your_key \
+  -e KITH_LLM_MODEL=gpt-4o \
+  ghcr.io/tictacguy/kith:latest
+```
+
 Open `http://localhost:8000`.
 
 ### Docker Compose

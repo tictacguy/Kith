@@ -10,6 +10,10 @@ RUN npm run build
 # Stage 2: Python backend + static frontend
 FROM python:3.11-slim
 
+LABEL org.opencontainers.image.source=https://github.com/tictacguy/kith
+LABEL org.opencontainers.image.description="A persistent AI society that deliberates, debates, delegates, and evolves"
+LABEL org.opencontainers.image.licenses=AGPL-3.0
+
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
