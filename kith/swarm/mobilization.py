@@ -27,6 +27,7 @@ from typing import Any
 from ..agents.caveman import CavemanBackend
 from ..api.events import EventType, event_bus
 from ..config import Config, make_backend
+from ..society.relationships import get_top_allies, get_affinity
 from ..society.state import Agent, Society
 
 
@@ -154,13 +155,26 @@ class MobilizationEngine:
         if not activated:
             activated = [bids[0]]
 
-        # High-reputation agents get a boost — if they bid close to threshold, include them
+        # High-reputation agents get a boost
         for bid in bids:
             if bid in activated:
                 continue
             agent = next((a for a in active if a.id == bid.agent_id), None)
             if agent and agent.reputation > 0.7 and bid.relevance >= threshold * 0.7:
                 activated.append(bid)
+
+        # Ally boost: if an activated agent has strong allies below threshold, pull them in
+        activated_ids_set = {b.agent_id for b in activated}
+        for bid in bids:
+            if bid.agent_id in activated_ids_set:
+                continue
+            # Check if any activated agent has high affinity with this one
+            for act_bid in activated:
+                affinity = get_affinity(society, act_bid.agent_id, bid.agent_id)
+                if affinity > 0.3 and bid.relevance >= threshold * 0.5:
+                    activated.append(bid)
+                    activated_ids_set.add(bid.agent_id)
+                    break
 
         activated_ids = [b.agent_id for b in activated]
         level = _level_for_count(len(activated_ids))

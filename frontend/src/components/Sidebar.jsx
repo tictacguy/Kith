@@ -1,5 +1,4 @@
 import { useState, useRef, useEffect } from 'react'
-import { sendPrompt } from '../api/client'
 import ConfigPanel from './ConfigPanel'
 import AgentDetail from './AgentDetail'
 
@@ -32,25 +31,12 @@ const EVENT_LABELS = {
   tool_called: 'tool called',
   memory_compressed: 'memory compressed',
   society_evolved: 'society evolved',
+  retrospective_start: 'retrospective',
+  retrospective_end: 'retrospective done',
 }
 
-export default function Sidebar({ state, events, connected, selectedAgent, onSelectAgent, onResponse }) {
-  const [prompt, setPrompt] = useState('')
-  const [sending, setSending] = useState(false)
+export default function Sidebar({ state, events, connected, selectedAgent, onSelectAgent }) {
   const [tab, setTab] = useState('console')
-
-  const handleSend = async () => {
-    if (!prompt.trim() || sending) return
-    setSending(true)
-    try {
-      const res = await sendPrompt(prompt.trim())
-      onResponse(res)
-      setPrompt('')
-    } catch (e) {
-      onResponse({ error: e.response?.data?.detail || e.message })
-    }
-    setSending(false)
-  }
 
   const agents = (state?.agents || []).filter(a => a.node_type !== 'system' && a.id !== '__historian__')
   const tools = state?.tools || []
@@ -95,7 +81,7 @@ export default function Sidebar({ state, events, connected, selectedAgent, onSel
 
       {/* Content */}
       <div style={s.content}>
-        {tab === 'console' && <ConsoleTab events={events} prompt={prompt} setPrompt={setPrompt} sending={sending} onSend={handleSend} />}
+        {tab === 'console' && <ConsoleTab events={events} />}
         {tab === 'entities' && <EntitiesTab agents={agents} tools={tools} onSelectAgent={onSelectAgent} />}
         {tab === 'memory' && <MemoryTab state={state} />}
         {tab === 'config' && <div style={s.scrollable}><ConfigPanel /></div>}
@@ -107,43 +93,46 @@ export default function Sidebar({ state, events, connected, selectedAgent, onSel
 // ---------------------------------------------------------------------------
 // Console — live event feed only (prompt moved above tabs)
 // ---------------------------------------------------------------------------
-function ConsoleTab({ events, prompt, setPrompt, sending, onSend }) {
+function ConsoleTab({ events }) {
   const liveRef = useRef(null)
   useEffect(() => { if (liveRef.current) liveRef.current.scrollTop = 0 }, [events])
 
   return (
     <div style={s.consoleLayout}>
-      {/* Prompt input */}
-      <div style={s.promptArea}>
-        <div style={s.promptBox}>
-          <textarea
-            value={prompt}
-            onChange={e => setPrompt(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSend() } }}
-            placeholder="Ask the society something..."
-            rows={2}
-            style={s.promptInput}
-            disabled={sending}
-          />
-          <button onClick={onSend} disabled={sending || !prompt.trim()} style={s.promptBtn}>
-            {sending ? (
-              <span style={s.spinner} />
-            ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
-              </svg>
-            )}
-          </button>
-        </div>
-      </div>
-
       {/* Live feed */}
       <div style={s.liveContainer}>
         <div ref={liveRef} style={s.liveFeed}>
           {events.length === 0 && <div style={s.muted}>waiting for activity...</div>}
           {events.map((e, i) => {
             const label = EVENT_LABELS[e.type] || e.type
+            const isEvolution = e.type === 'society_evolved'
+            const isRetro = e.type === 'retrospective_end'
             const detail = e.data?.agent_name || e.data?.tool_name || e.data?.prompt?.slice(0, 40) || e.data?.vote || ''
+
+            // Retrospective events: show actions taken
+            if (isRetro && e.data?.actions_taken?.length) {
+              return e.data.actions_taken.map((line, j) => (
+                <div key={`${i}-r-${j}`} style={s.eventRowEvolution}>
+                  <span style={s.eventTime}>
+                    {new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                  </span>
+                  <span style={s.eventLabelEvolution}>retro: {line}</span>
+                </div>
+              ))
+            }
+
+            // Evolution events: render each changelog line separately
+            if (isEvolution && e.data?.changelog?.length) {
+              return e.data.changelog.map((line, j) => (
+                <div key={`${i}-${j}`} style={s.eventRowEvolution}>
+                  <span style={s.eventTime}>
+                    {new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                  </span>
+                  <span style={s.eventLabelEvolution}>{line}</span>
+                </div>
+              ))
+            }
+
             return (
               <div key={i} style={s.eventRow}>
                 <span style={s.eventTime}>
@@ -271,6 +260,49 @@ function MemoryTab({ state }) {
           {state.total_interactions} total interactions
         </div>
       </div>
+
+      {/* Last retrospective */}
+      {state.last_retrospective && (
+        <div style={s.memSection}>
+          <div style={s.memLabel}>Last Retrospective</div>
+          <div style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--mono)', marginBottom: 8 }}>
+            {state.last_retrospective.range}
+          </div>
+
+          {state.last_retrospective.quality && (
+            <div style={{ fontSize: 12, lineHeight: 1.6, marginBottom: 12 }}>
+              {state.last_retrospective.quality}
+            </div>
+          )}
+
+          {state.last_retrospective.strengths?.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 600, marginBottom: 4 }}>STRENGTHS</div>
+              {state.last_retrospective.strengths.map((s, i) => (
+                <div key={i} style={{ fontSize: 11, color: '#0a7', lineHeight: 1.5 }}>+ {s}</div>
+              ))}
+            </div>
+          )}
+
+          {state.last_retrospective.weaknesses?.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 600, marginBottom: 4 }}>WEAKNESSES</div>
+              {state.last_retrospective.weaknesses.map((s, i) => (
+                <div key={i} style={{ fontSize: 11, color: '#c44', lineHeight: 1.5 }}>- {s}</div>
+              ))}
+            </div>
+          )}
+
+          {state.last_retrospective.actions_taken?.length > 0 && (
+            <div>
+              <div style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 600, marginBottom: 4 }}>ACTIONS TAKEN</div>
+              {state.last_retrospective.actions_taken.map((s, i) => (
+                <div key={i} style={{ fontSize: 11, color: '#0066cc', lineHeight: 1.5 }}>{s}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -350,6 +382,11 @@ const s = {
   eventTime: { color: 'var(--muted)', fontSize: 10, flexShrink: 0, width: 60 },
   eventLabel: { color: 'var(--fg)', fontWeight: 500, flexShrink: 0 },
   eventDetail: { color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  eventRowEvolution: {
+    display: 'flex', gap: 8, fontSize: 11, fontFamily: 'var(--mono)', padding: '4px 0',
+    borderBottom: '1px solid var(--border)', background: 'rgba(0,100,200,0.04)',
+  },
+  eventLabelEvolution: { color: '#0066cc', fontWeight: 500, flex: 1 },
 
   // Entities tab
   entityGroupLabel: {

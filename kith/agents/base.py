@@ -95,8 +95,6 @@ class KithAgent:
             tool_lines = [f"  - {t.name}({', '.join(t.parameters.keys())}): {t.description}" for t in society.tools.values()]
             tools_desc = "\nAvailable tools (invoke with TOOL_CALL: name(args)):\n" + "\n".join(tool_lines)
 
-        society_mem = f"Society memory: {society.society_summary}\n" if society.society_summary else ""
-
         return (
             f"You are {self.agent.name}. {role_desc}.\n"
             f"Traits: {traits}. Expertise: {expertise}.\n"
@@ -104,8 +102,7 @@ class KithAgent:
             f"{sup_str}"
             f"Your peers:\n{peers_str}\n"
             f"Society policies:\n{policies}\n"
-            f"{society_mem}"
-            f"Relevant past context:\n{memory_ctx}\n"
+            f"Relevant context from past interactions:\n{memory_ctx}\n"
             f"Your memory: {self.agent.memory_summary or 'none yet'}\n"
             f"{tools_desc}\n\n"
             f"Task: {user_prompt}"

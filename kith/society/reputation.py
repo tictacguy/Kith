@@ -15,7 +15,23 @@ Reputation drives:
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from ..society.state import Agent, AgentStatus, Society
+
+
+def _log_event(agent: Agent, event_type: str, detail: str, impact: float) -> None:
+    """Append a reputation event to the agent's log."""
+    agent.reputation_log.append({
+        "type": event_type,
+        "detail": detail,
+        "impact": round(impact, 3),
+        "reputation_after": round(agent.reputation, 3),
+        "ts": datetime.now(timezone.utc).isoformat(),
+    })
+    # Keep last 50 events
+    if len(agent.reputation_log) > 50:
+        agent.reputation_log = agent.reputation_log[-50:]
 
 
 # ---------------------------------------------------------------------------
@@ -136,12 +152,12 @@ def update_reputation(agent: Agent) -> None:
 
 
 def record_verdict(agent: Agent, verdict: str) -> None:
-    """Record a supervision verdict."""
     if verdict == "approved":
         agent.approved_count += 1
     elif verdict == "vetoed":
         agent.vetoed_count += 1
     update_reputation(agent)
+    _log_event(agent, "verdict", f"Supervisor {verdict} response", agent.reputation)
 
 
 def record_debate(agent: Agent, won: bool) -> None:
@@ -150,11 +166,13 @@ def record_debate(agent: Agent, won: bool) -> None:
     else:
         agent.debates_lost += 1
     update_reputation(agent)
+    _log_event(agent, "debate", f"{'Won' if won else 'Lost'} debate", agent.reputation)
 
 
 def record_delegation_received(agent: Agent) -> None:
     agent.delegations_received += 1
     update_reputation(agent)
+    _log_event(agent, "delegation", "Received delegation from peer (trust)", agent.reputation)
 
 
 def record_consensus_vote(agent: Agent, with_majority: bool) -> None:
@@ -163,3 +181,4 @@ def record_consensus_vote(agent: Agent, with_majority: bool) -> None:
     else:
         agent.consensus_dissents += 1
     update_reputation(agent)
+    _log_event(agent, "consensus", f"Voted {'with' if with_majority else 'against'} majority", agent.reputation)

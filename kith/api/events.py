@@ -60,6 +60,10 @@ class EventType(str, Enum):
     MOBILIZATION_END = "mobilization_end"
     AGENT_BIDDING = "agent_bidding"
 
+    # Retrospective
+    RETROSPECTIVE_START = "retrospective_start"
+    RETROSPECTIVE_END = "retrospective_end"
+
 
 class EventBus:
     """Async broadcast bus. WebSocket handlers subscribe, orchestrator publishes."""

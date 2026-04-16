@@ -111,6 +111,24 @@ export default function AgentDetail({ agent: agentProp, state, onBack }) {
             <RepStat label="debates lost" value={agent.debates_lost || 0} />
             <RepStat label="delegations" value={agent.delegations_received || 0} />
           </div>
+          {!(agent.approved_count || agent.vetoed_count || agent.debates_won || agent.debates_lost || agent.delegations_received) && (
+            <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 6 }}>
+              Counters update as the society evolves and agents participate in supervision, debates, and delegations.
+            </div>
+          )}
+          {/* Reputation log */}
+          {agent.reputation_log?.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={s.sectionTitle}>History</div>
+              {agent.reputation_log.slice().reverse().map((ev, i) => (
+                <div key={i} style={s.repLogRow}>
+                  <span style={s.repLogType}>{ev.type}</span>
+                  <span style={s.repLogDetail}>{ev.detail}</span>
+                  <span style={s.repLogScore}>{(ev.reputation_after * 100).toFixed(0)}%</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Hierarchy */}
@@ -227,7 +245,11 @@ const s = {
   repGrid: { display: 'flex', flexWrap: 'wrap', gap: 12 },
   repStat: { fontSize: 10, fontFamily: 'var(--mono)' },
   repStatValue: { color: 'var(--fg)', fontWeight: 600 },
-  repStatLabel: { color: 'var(--muted)', marginLeft: 3 },
+  repStatLabel: { color: 'var(--muted)', marginLeft: 6 },
+  repLogRow: { display: 'flex', gap: 8, fontSize: 10, fontFamily: 'var(--mono)', padding: '3px 0', borderBottom: '1px solid var(--border)' },
+  repLogType: { color: 'var(--fg)', fontWeight: 500, minWidth: 70 },
+  repLogDetail: { color: 'var(--muted)', flex: 1 },
+  repLogScore: { color: 'var(--fg)', fontWeight: 600, minWidth: 30, textAlign: 'right' },
 
   // Memory
   memoryBlock: {

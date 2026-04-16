@@ -13,9 +13,14 @@ from ..society.state import (
     Agent, AgentStatus, EvolutionStage, Interaction, Society, SocietyPolicy, ToolSpec,
 )
 from ..society.reputation import record_verdict, check_lifecycle, update_reputation
+from ..society.relationships import (
+    record_co_participation, record_supervision_veto, record_supervision_approval,
+    get_top_allies,
+)
 from ..society.store import KithStore
 from ..swarm.deliberation import DeliberationEngine
 from ..swarm.mobilization import MobilizationEngine
+from ..swarm.retrospective import RetrospectiveEngine
 from ..swarm.supervision import SupervisionChain, SupervisedResponse
 from ..tools.executor import execute_tool_calls, format_tool_results
 from ..tools.proposer import ToolProposer
@@ -31,6 +36,7 @@ class Orchestrator:
         self._historian = Historian(cfg)
         self._deliberation = DeliberationEngine(cfg)
         self._mobilization = MobilizationEngine(cfg)
+        self._retrospective = RetrospectiveEngine(cfg)
         self._supervision = SupervisionChain(cfg, self._evolution)
         self._tool_proposer = ToolProposer(cfg)
         self._society: Society | None = None
@@ -65,6 +71,7 @@ class Orchestrator:
                     "debates_won": a.debates_won,
                     "debates_lost": a.debates_lost,
                     "delegations_received": a.delegations_received,
+                    "reputation_log": a.reputation_log[-10:],  # last 10 events
                 }
                 for a in s.agents.values()
             ] + [
@@ -89,6 +96,12 @@ class Orchestrator:
             "policies": [
                 {"id": p.id, "name": p.name, "rule": p.rule, "active": p.active}
                 for p in s.policies.values()
+            ],
+            "last_retrospective": s.last_retrospective or None,
+            "relationships": [
+                {"agents": k.split(":"), "affinity": v}
+                for k, v in s.relationships.items()
+                if abs(v) > 0.05  # only send meaningful relationships
             ],
         }
 
@@ -161,9 +174,10 @@ class Orchestrator:
             await self.boot()
         society = self._society
 
-        # 1. Memory retrieval
-        memory_hits = self._store.semantic_search(user_prompt, n=5)
-        relevant_memory = [h["document"] for h in memory_hits]
+        # 1. Retrieve relevant facts (semantic search, not global summary)
+        from ..society.historian import Historian
+        relevant_facts = Historian.retrieve_relevant_context(user_prompt, self._store, n=8)
+        relevant_memory = relevant_facts
 
         # 2. Mobilize — distributed bid phase, agents self-select
         mob_result = await self._mobilization.mobilize(user_prompt, society, self._executor)
@@ -249,15 +263,27 @@ class Orchestrator:
             society_stage_at_time=society.stage, token_count=total_tokens,
         )
 
-        # 8. HISTORIAN — analyze interaction, update memory, extract themes
+        # 8. HISTORIAN — extract facts, vectorize, update themes
         mem_update = await self._historian.process_interaction(
             interaction, society, selected_ids, self._executor,
         )
-        society.society_summary = mem_update.society_summary
-        society.dominant_themes = mem_update.themes
+        # Vectorize discrete facts into ChromaDB
+        self._historian.vectorize_facts(mem_update.facts, interaction, self._store)
+        # Update themes (accumulated by Historian)
+        if mem_update.themes:
+            # Merge with existing, keep unique, cap at 15
+            existing = set(society.dominant_themes)
+            for t in mem_update.themes:
+                existing.add(t)
+            society.dominant_themes = list(existing)[:15]
         interaction.themes = mem_update.themes
         total_tokens += mem_update.tokens_used
         interaction.token_count = total_tokens
+
+        # Update society summary for display (not injected into prompts)
+        society.society_summary = await self._historian.build_summary(
+            self._store, society, self._executor
+        )
 
         # Update individual agent memories from Historian notes
         for aid, note in mem_update.agent_notes.items():
@@ -277,7 +303,10 @@ class Orchestrator:
         if compress_tasks:
             await asyncio.gather(*compress_tasks)
 
-        # 10. Persist
+        # 10. Record relationships — co-participation
+        record_co_participation(society, selected_ids)
+
+        # 11. Persist
         await self._store.save_interaction(interaction)
         society.total_interactions += 1
         for ka in selected_agents:
@@ -344,6 +373,23 @@ class Orchestrator:
                 await self._store.upsert_policy(policy)
             self._emit(EventType.SOCIETY_EVOLVED, {"changelog": changelog})
 
+        # 16. Retrospective — society self-reflects every N interactions
+        retro_report = await self._retrospective.maybe_run(
+            society, self._store, self._executor,
+        )
+        if retro_report:
+            society.last_retrospective = {
+                "timestamp": retro_report.timestamp,
+                "range": retro_report.interaction_range,
+                "quality": retro_report.quality_assessment,
+                "strengths": retro_report.recurring_strengths,
+                "weaknesses": retro_report.recurring_weaknesses,
+                "actions_taken": retro_report.actions_taken,
+            }
+            # Persist any new policies created by retrospective
+            for policy in society.policies.values():
+                await self._store.upsert_policy(policy)
+
         await self._store.save_society(society)
         return interaction
 
@@ -392,10 +438,15 @@ class Orchestrator:
 
         supervised = await self._supervision.review(responses, token_map, society, self._executor)
 
-        # Record supervision verdicts into reputation
+        # Record supervision verdicts into reputation + relationships
         for s in supervised:
             if s.supervisor_id and s.agent_id in society.agents:
                 record_verdict(society.agents[s.agent_id], s.supervisor_verdict)
+                # Relationship signal
+                if s.supervisor_verdict == "vetoed":
+                    record_supervision_veto(society, s.supervisor_id, s.agent_id)
+                elif s.supervisor_verdict == "approved":
+                    record_supervision_approval(society, s.supervisor_id, s.agent_id)
             if s.supervisor_id:
                 self._emit(EventType.AGENT_VERDICT, {
                     "supervisor_id": s.supervisor_id, "subordinate_id": s.agent_id,

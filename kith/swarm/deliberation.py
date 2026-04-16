@@ -20,6 +20,7 @@ from ..config import Config, make_backend
 from ..agents.caveman import CavemanBackend
 from ..society.state import Agent, EvolutionStage, Society
 from ..society.reputation import vote_weight, record_delegation_received, record_debate, record_consensus_vote
+from ..society.relationships import record_delegation, record_consensus_alignment, record_debate_outcome
 
 
 @dataclass
@@ -167,6 +168,7 @@ class DeliberationEngine:
         for d in delegations:
             if d["to"] in agent_map:
                 record_delegation_received(agent_map[d["to"]].agent)
+                record_delegation(society, d["from"], d["to"])
 
         # ===================================================================
         # 4. DEBATE — skip if skip_debate=True (team level)
@@ -213,6 +215,8 @@ class DeliberationEngine:
                     a_won = a_name.lower() in resolution.lower()
                     record_debate(agent_map[a_id].agent, a_won)
                     record_debate(agent_map[b_id].agent, not a_won)
+                    winner, loser = (a_id, b_id) if a_won else (b_id, a_id)
+                    record_debate_outcome(society, winner, loser)
 
                 debates.append({
                     "agent_a": a_name, "agent_b": b_name,
@@ -281,6 +285,13 @@ class DeliberationEngine:
             if aid in agent_map:
                 with_majority = (v == "agree" and majority_is_agree) or (v == "disagree" and not majority_is_agree)
                 record_consensus_vote(agent_map[aid].agent, with_majority)
+
+        # Record pairwise consensus relationships
+        agent_ids_list = list(consensus.keys())
+        for i, aid_a in enumerate(agent_ids_list):
+            for aid_b in agent_ids_list[i + 1:]:
+                aligned = consensus.get(aid_a) == consensus.get(aid_b)
+                record_consensus_alignment(society, aid_a, aid_b, aligned)
 
         if majority_is_agree:
             # Use the Elder's final position as consensus, or first agreeing agent

@@ -89,6 +89,9 @@ class Agent(BaseModel):
     consensus_dissents: int = 0       # times voted against majority
     previous_role_id: str | None = None  # for demotion tracking
 
+    # Reputation event log — why the score is what it is
+    reputation_log: list[dict[str, Any]] = Field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # Society
@@ -121,6 +124,16 @@ class Society(BaseModel):
 
     # Global compressed memory maintained by Memory Keeper
     society_summary: str = ""
+
+    # Last retrospective report (for frontend display)
+    last_retrospective: dict[str, Any] = Field(default_factory=dict)
+
+    # Bilateral relationships: "agent_a:agent_b" → affinity score [-1.0, 1.0]
+    # Positive = trust/collaboration, Negative = conflict/distrust
+    relationships: dict[str, float] = Field(default_factory=dict)
+
+    # Relationship event log for transparency
+    relationship_log: list[dict[str, Any]] = Field(default_factory=list)
 
     @property
     def active_agents(self) -> list[Agent]:

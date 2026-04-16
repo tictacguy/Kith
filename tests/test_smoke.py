@@ -293,7 +293,8 @@ async def test_supervisor_assignment(cfg: Config):
 async def test_tool_execution_parsing():
     """Verify tool call parsing and execution works."""
     from kith.tools.executor import parse_tool_calls, execute_tool_calls
-    from kith.tools.registry import build_default_registry, BUILTIN_TOOLS
+    from kith.tools.registry import build_default_registry
+    from kith.society.state import ToolSpec
 
     # Test parsing
     text = 'Need info. TOOL_CALL: search_memory(query="kubernetes pods") then summarize.'
@@ -310,31 +311,18 @@ async def test_tool_execution_parsing():
     calls2 = parse_tool_calls(text2)
     assert len(calls2) == 2
 
-    # Test execution with registry
+    # Test execution with empty registry (no builtin tools)
     registry = build_default_registry()
-    name_to_id = {spec.name: spec.id for spec, _ in BUILTIN_TOOLS}
-
     results = await execute_tool_calls(
-        'TOOL_CALL: summarize(text="hello world this is a test")',
-        registry,
-        name_to_id,
-    )
-    assert len(results) == 1
-    assert results[0].success is True
-    assert "summary" in str(results[0].result).lower()
-
-    # Test unknown tool
-    results2 = await execute_tool_calls(
         'TOOL_CALL: nonexistent_tool(x=1)',
         registry,
-        name_to_id,
+        {},
     )
-    assert len(results2) == 1
-    assert results2[0].success is False
+    assert len(results) == 1
+    assert results[0].success is False
 
     print(f"  Parse test: {len(calls)} calls found")
-    print(f"  Execution test: {results[0].result}")
-    print(f"  Unknown tool test: {results2[0].error}")
+    print(f"  Unknown tool test: {results[0].error}")
 
 
 # ---------------------------------------------------------------------------

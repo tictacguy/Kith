@@ -1,19 +1,17 @@
 """
-Historian — the society's dedicated memory keeper.
+Historian — vectorized society memory.
 
-Not a compressor. Not a word counter. An intelligent agent that:
-1. After each interaction, decides what's worth remembering
-2. Maintains structured memory: topics, decisions, expertise, patterns
-3. Extracts meaningful themes (via LLM, not word counting)
-4. Compresses individual agent memories when needed
-5. Serves as the bridge between agents and historical context
+Instead of maintaining a global summary that pollutes every prompt,
+the Historian extracts discrete FACTS from each interaction and
+vectorizes them in ChromaDB. When agents need context, only
+semantically relevant facts are retrieved.
 
-Uses caveman ultra internally for token efficiency.
+Each fact has rich metadata: who was involved, what happened,
+the outcome, and the topic domain.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -26,19 +24,13 @@ from ..society.state import Agent, Interaction, Society
 
 @dataclass
 class MemoryUpdate:
-    """Output of the Historian after processing an interaction."""
-    society_summary: str          # updated narrative summary
-    themes: list[str]             # meaningful topic keywords (LLM-extracted)
-    agent_notes: dict[str, str]   # agent_id → what this agent should remember
+    facts: list[dict[str, str]]       # [{text, type, agents, topic}]
+    themes: list[str]
+    agent_notes: dict[str, str]       # agent_id → note
     tokens_used: int = 0
 
 
 class Historian:
-    """
-    The society's memory. Runs after every interaction.
-    One LLM call to analyze what happened and update memory.
-    """
-
     def __init__(self, cfg: Config) -> None:
         backend = make_backend(cfg)
         self._backend = CavemanBackend(backend, intensity="ultra")
@@ -48,7 +40,7 @@ class Historian:
         return result.get("content", "").strip(), result.get("output_tokens", 0)
 
     # -----------------------------------------------------------------------
-    # Main entry: process an interaction and update memory
+    # Extract facts from an interaction
     # -----------------------------------------------------------------------
 
     def process_interaction_sync(
@@ -57,11 +49,6 @@ class Historian:
         society: Society,
         participating_agent_ids: list[str],
     ) -> MemoryUpdate:
-        """
-        Analyze what happened in this interaction and produce a memory update.
-        Single LLM call — efficient.
-        """
-        # Build context
         agent_names = []
         for aid in participating_agent_ids:
             if aid in society.agents:
@@ -69,134 +56,167 @@ class Historian:
                 role = society.roles.get(a.role_id)
                 agent_names.append(f"{a.name} ({role.name if role else '?'})")
 
-        existing_summary = society.society_summary or "No history yet."
-        existing_themes = ", ".join(society.dominant_themes[:5]) if society.dominant_themes else "none"
-
         prompt = (
-            f"You are the Historian of a society called Kith.\n\n"
-            f"CURRENT MEMORY:\n{existing_summary}\n\n"
-            f"CURRENT THEMES: {existing_themes}\n\n"
-            f"NEW INTERACTION:\n"
+            f"You are the Historian. Extract discrete facts from this interaction.\n\n"
             f"User asked: {interaction.user_prompt}\n"
-            f"Agents involved: {', '.join(agent_names)}\n"
-            f"Final response: {interaction.final_response[:300]}\n"
+            f"Agents: {', '.join(agent_names)}\n"
+            f"Response: {interaction.final_response[:400]}\n"
             f"Tools used: {', '.join(interaction.tools_used) or 'none'}\n\n"
-            f"TASKS:\n"
-            f"1. SUMMARY: Update the society memory in 2-3 sentences. What did the society learn? "
-            f"What expertise was demonstrated? Do NOT list agent names or repeat old info verbatim.\n"
-            f"2. THEMES: Extract 3-5 meaningful topic keywords from this interaction. "
-            f"Not generic words — specific domains/concepts discussed.\n"
-            f"3. AGENT_NOTES: For each participating agent, write one sentence about what they "
-            f"should remember from this interaction.\n\n"
-            f"Reply in this exact format:\n"
-            f"SUMMARY: <2-3 sentences>\n"
-            f"THEMES: <comma-separated keywords>\n"
-            f"AGENT_NOTES:\n"
-            f"<agent_name>: <one sentence>\n"
+            f"Extract:\n"
+            f"1. FACTS: 2-5 discrete, self-contained facts learned. Each on its own line prefixed with '- '.\n"
+            f"   Each fact should make sense on its own without context.\n"
+            f"2. THEMES: 3-5 specific topic keywords (not generic words).\n"
+            f"3. AGENT_NOTES: For each agent, one sentence about what they contributed.\n\n"
+            f"Format:\n"
+            f"FACTS:\n- <fact 1>\n- <fact 2>\n"
+            f"THEMES: <comma-separated>\n"
+            f"AGENT_NOTES:\n<name>: <note>\n"
         )
 
         text, tokens = self._call_sync(prompt)
-        return self._parse_update(text, tokens, participating_agent_ids, society)
+        return self._parse(text, tokens, participating_agent_ids, society)
 
-    def _parse_update(
-        self, text: str, tokens: int,
-        agent_ids: list[str], society: Society,
-    ) -> MemoryUpdate:
-        """Parse the Historian's structured response."""
-        summary = ""
+    def _parse(self, text: str, tokens: int, agent_ids: list[str], society: Society) -> MemoryUpdate:
+        facts: list[dict[str, str]] = []
         themes: list[str] = []
         agent_notes: dict[str, str] = {}
 
-        # Parse SUMMARY
-        m = re.search(r"SUMMARY:\s*(.+?)(?=\nTHEMES:|\nAGENT_NOTES:|\Z)", text, re.DOTALL | re.IGNORECASE)
-        if m:
-            summary = m.group(1).strip()
+        # Parse FACTS
+        facts_match = re.search(r"FACTS:\s*(.+?)(?=\nTHEMES:|\nAGENT_NOTES:|\Z)", text, re.DOTALL | re.IGNORECASE)
+        if facts_match:
+            for line in facts_match.group(1).strip().split("\n"):
+                line = line.strip().lstrip("- ").strip()
+                if line and len(line) > 10:
+                    facts.append({"text": line})
 
         # Parse THEMES
-        m = re.search(r"THEMES:\s*(.+?)(?=\nAGENT_NOTES:|\Z)", text, re.DOTALL | re.IGNORECASE)
-        if m:
-            raw_themes = m.group(1).strip()
-            themes = [t.strip().lower() for t in raw_themes.split(",") if t.strip() and len(t.strip()) > 2]
+        themes_match = re.search(r"THEMES:\s*(.+?)(?=\nAGENT_NOTES:|\Z)", text, re.DOTALL | re.IGNORECASE)
+        if themes_match:
+            themes = [t.strip().lower() for t in themes_match.group(1).strip().split(",") if t.strip() and len(t.strip()) > 2]
 
         # Parse AGENT_NOTES
-        notes_section = re.search(r"AGENT_NOTES:\s*(.+)", text, re.DOTALL | re.IGNORECASE)
-        if notes_section:
+        notes_match = re.search(r"AGENT_NOTES:\s*(.+)", text, re.DOTALL | re.IGNORECASE)
+        if notes_match:
             name_to_id = {}
             for aid in agent_ids:
                 if aid in society.agents:
                     name_to_id[society.agents[aid].name.lower()] = aid
-
-            for line in notes_section.group(1).strip().split("\n"):
+            for line in notes_match.group(1).strip().split("\n"):
                 line = line.strip()
                 if ":" in line:
                     name_part, note = line.split(":", 1)
                     name_clean = name_part.strip().lower()
-                    # Match agent name
                     for name, aid in name_to_id.items():
                         if name in name_clean or name_clean in name:
                             agent_notes[aid] = note.strip()
                             break
 
-        # Fallbacks
-        if not summary:
-            summary = society.society_summary or ""
-        if not themes:
-            themes = society.dominant_themes[:5]
+        return MemoryUpdate(facts=facts, themes=themes[:8], agent_notes=agent_notes, tokens_used=tokens)
 
-        return MemoryUpdate(
-            society_summary=summary,
-            themes=themes[:5],
-            agent_notes=agent_notes,
-            tokens_used=tokens,
+    # -----------------------------------------------------------------------
+    # Vectorize facts into ChromaDB
+    # -----------------------------------------------------------------------
+
+    def vectorize_facts(self, facts: list[dict[str, str]], interaction: Interaction, store) -> None:
+        """Store each fact as a separate vector in ChromaDB with rich metadata."""
+        for i, fact in enumerate(facts):
+            doc_id = f"fact:{interaction.id}:{i}"
+            store._vec.upsert(
+                ids=[doc_id],
+                documents=[fact["text"]],
+                metadatas=[{
+                    "type": "fact",
+                    "interaction_id": interaction.id,
+                    "prompt": interaction.user_prompt[:100],
+                    "agents": ",".join(interaction.assigned_agents[:5]),
+                    "themes": ",".join(interaction.themes[:5]),
+                    "stage": interaction.society_stage_at_time.value,
+                }],
+            )
+
+    # -----------------------------------------------------------------------
+    # Retrieve relevant facts for a new prompt
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def retrieve_relevant_context(prompt: str, store, n: int = 8) -> list[str]:
+        """Semantic search for facts relevant to the current prompt."""
+        results = store.semantic_search(prompt, n=n, filter_type="fact")
+        # Deduplicate and return fact texts
+        seen = set()
+        facts = []
+        for r in results:
+            text = r["document"]
+            if text not in seen and r["distance"] < 0.8:  # relevance threshold
+                seen.add(text)
+                facts.append(text)
+        return facts
+
+    # -----------------------------------------------------------------------
+    # Build society summary from recent facts (for Memory tab display only)
+    # -----------------------------------------------------------------------
+
+    def build_summary_sync(self, store, society: Society) -> str:
+        """Build a summary from the most recent vectorized facts. For display only, NOT injected into prompts."""
+        # Get recent facts
+        try:
+            results = store._vec.get(
+                where={"type": "fact"},
+                limit=20,
+                include=["documents", "metadatas"],
+            )
+        except Exception:
+            return society.society_summary or ""
+
+        if not results or not results.get("documents"):
+            return society.society_summary or ""
+
+        docs = results["documents"]
+        if not docs:
+            return ""
+
+        facts_text = "\n".join(f"- {d}" for d in docs[:15])
+
+        prompt = (
+            f"Summarize these facts about a society's history in 3-4 sentences. "
+            f"Cover the breadth of topics, not just the latest.\n\n"
+            f"FACTS:\n{facts_text}"
         )
+        summary, _ = self._call_sync(prompt)
+        return summary if summary else society.society_summary or ""
 
     # -----------------------------------------------------------------------
     # Agent memory compression
     # -----------------------------------------------------------------------
 
     def compress_agent_memory_sync(self, agent: Agent, society: Society) -> str:
-        """Compress an agent's memory when it gets too long."""
         role = society.roles.get(agent.role_id)
         role_name = role.name if role else "agent"
-
         prompt = (
             f"Compress this {role_name}'s memory to key facts only (max 400 chars). "
-            f"Keep: decisions made, expertise gained, important outcomes. "
-            f"Drop: redundant details.\n\n"
+            f"Keep: decisions, expertise, outcomes. Drop: redundant details.\n\n"
             f"MEMORY:\n{agent.memory_summary}"
         )
         compressed, _ = self._call_sync(prompt)
         return compressed if compressed else agent.memory_summary[:400]
 
     async def maybe_compress_agent(self, agent: Agent, society: Society, executor) -> bool:
-        """Compress if over 1200 chars."""
         if len(agent.memory_summary) < 1200:
             return False
         loop = asyncio.get_event_loop()
-        compressed = await loop.run_in_executor(
-            executor, self.compress_agent_memory_sync, agent, society
-        )
+        compressed = await loop.run_in_executor(executor, self.compress_agent_memory_sync, agent, society)
         agent.memory_summary = compressed
         return True
 
     # -----------------------------------------------------------------------
-    # Async wrapper for orchestrator
+    # Async wrappers
     # -----------------------------------------------------------------------
 
-    async def process_interaction(
-        self,
-        interaction: Interaction,
-        society: Society,
-        participating_agent_ids: list[str],
-        executor,
-    ) -> MemoryUpdate:
+    async def process_interaction(self, interaction, society, agent_ids, executor) -> MemoryUpdate:
         loop = asyncio.get_event_loop()
-        event_bus.emit(EventType.MEMORY_COMPRESSED, {
-            "agent_name": "Historian", "agent_id": "historian",
-        })
-        update = await loop.run_in_executor(
-            executor,
-            self.process_interaction_sync,
-            interaction, society, participating_agent_ids,
-        )
-        return update
+        event_bus.emit(EventType.MEMORY_COMPRESSED, {"agent_name": "Historian", "agent_id": "historian"})
+        return await loop.run_in_executor(executor, self.process_interaction_sync, interaction, society, agent_ids)
+
+    async def build_summary(self, store, society, executor) -> str:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(executor, self.build_summary_sync, store, society)

@@ -103,6 +103,17 @@ export default function SocietyGraph({ state, selectedAgent, onSelectAgent, acti
       if (n.supervisorId && nodeIds.has(n.supervisorId))
         newLinks.push({ source: n.supervisorId, target: n.id, linkType: 'supervision' })
     })
+    // Add relationship links (trust/distrust)
+    const relationships = state.relationships || []
+    relationships.forEach(r => {
+      if (r.agents?.length === 2 && nodeIds.has(r.agents[0]) && nodeIds.has(r.agents[1])) {
+        newLinks.push({
+          source: r.agents[0], target: r.agents[1],
+          linkType: r.affinity > 0 ? 'trust' : 'distrust',
+          affinity: r.affinity,
+        })
+      }
+    })
     linksRef.current = newLinks
 
     if (simRef.current) {
@@ -132,7 +143,7 @@ export default function SocietyGraph({ state, selectedAgent, onSelectAgent, acti
     <div style={styles.container}>
       <svg ref={svgRef} style={styles.svg} />
 
-      {/* Arrange button — bottom left */}
+      {/* Arrange button — top right */}
       <button onClick={arrange} style={styles.arrangeBtn}>Arrange</button>
 
       {/* Legend — top left */}
@@ -157,8 +168,18 @@ function renderGraph(g, nodes, links, selectedAgent, onSelectAgent, rawAgents) {
   linkSel.exit().remove()
   linkSel.enter().append('line')
     .attr('class', 'link')
-    .attr('stroke', '#ddd').attr('stroke-width', 1).attr('stroke-dasharray', '4,3')
-    .attr('marker-end', 'url(#arrow)')
+    .attr('stroke', d => {
+      if (d.linkType === 'trust') return 'rgba(0,150,0,0.3)'
+      if (d.linkType === 'distrust') return 'rgba(200,0,0,0.3)'
+      return '#ddd'
+    })
+    .attr('stroke-width', d => d.linkType === 'supervision' ? 1 : Math.max(0.5, Math.abs(d.affinity || 0) * 2))
+    .attr('stroke-dasharray', d => {
+      if (d.linkType === 'distrust') return '2,2'
+      if (d.linkType === 'supervision') return '4,3'
+      return 'none'
+    })
+    .attr('marker-end', d => d.linkType === 'supervision' ? 'url(#arrow)' : null)
 
   g.selectAll('.active-link').remove()
 
@@ -168,8 +189,8 @@ function renderGraph(g, nodes, links, selectedAgent, onSelectAgent, rawAgents) {
   const enter = nodeSel.enter().append('g').attr('class', 'node-group').style('cursor', 'pointer')
 
   enter.append('circle').attr('class', 'node-circle')
-    .attr('fill', d => d.nodeType === 'tool' ? '#f5f5f5' : d.nodeType === 'system' ? '#f0f0f0' : '#fff')
-    .attr('stroke', '#999').attr('stroke-width', 1.5)
+    .attr('fill', d => d.nodeType === 'tool' ? 'rgba(0,102,204,0.08)' : d.nodeType === 'system' ? '#f0f0f0' : '#fff')
+    .attr('stroke', d => d.nodeType === 'tool' ? '#0066cc' : '#999').attr('stroke-width', 1.5)
 
   enter.append('text').attr('class', 'node-symbol')
     .attr('text-anchor', 'middle').attr('dominant-baseline', 'central')
@@ -211,10 +232,13 @@ function renderGraph(g, nodes, links, selectedAgent, onSelectAgent, rawAgents) {
   allNodes.select('.node-symbol')
     .text(d => d.nodeType === 'tool' ? '⬡' : (ROLE_SHAPES[d.role] || '○'))
     .attr('font-size', d => d.nodeType === 'tool' ? 12 : d.nodeType === 'system' ? 14 : 10 + Math.min(d.interactions, 8))
+    .attr('fill', d => d.nodeType === 'tool' ? '#0066cc' : '#000')
     .attr('opacity', d => STATUS_OPACITY[d.status] || 1)
 
   allNodes.select('.node-name').text(d => d.name).attr('dy', d => r(d) + 12)
+    .attr('fill', d => d.nodeType === 'tool' ? '#0066cc' : '#000')
   allNodes.select('.node-role').text(d => d.nodeType === 'tool' ? 'tool' : d.nodeType === 'system' ? 'system' : d.role).attr('dy', d => r(d) + 24)
+    .attr('fill', d => d.nodeType === 'tool' ? '#0066cc' : '#999')
   allNodes.select('.glow-ring').attr('r', d => r(d) + 4)
 }
 
@@ -231,6 +255,7 @@ function renderTick(g, nodes, links) {
 
 function updateActivity(g, nodes, activeAgents, activeLinks, selectedAgent) {
   const nodeMap = Object.fromEntries(nodes.map(n => [n.id, n]))
+  const selId = selectedAgent?.id
 
   g.selectAll('.glow-ring')
     .attr('opacity', d => activeAgents.has(d.id) ? 1 : 0)
@@ -238,15 +263,53 @@ function updateActivity(g, nodes, activeAgents, activeLinks, selectedAgent) {
 
   g.selectAll('.node-circle')
     .attr('stroke', d => {
-      if (selectedAgent?.id === d.id) return '#000'
+      if (selId === d.id) return '#000'
       if (activeAgents.has(d.id)) return '#000'
       return '#999'
     })
     .attr('stroke-width', d => {
-      if (selectedAgent?.id === d.id) return 2.5
+      if (selId === d.id) return 2.5
       if (activeAgents.has(d.id)) return 2
       return 1.5
     })
+
+  // Highlight relationship links connected to selected agent
+  g.selectAll('.link')
+    .attr('opacity', d => {
+      if (!selId) return 1
+      const srcId = d.source.id || d.source
+      const tgtId = d.target.id || d.target
+      if (srcId === selId || tgtId === selId) return 1
+      return 0.1
+    })
+    .attr('stroke-width', d => {
+      if (!selId) {
+        if (d.linkType === 'supervision') return 1
+        return Math.max(0.5, Math.abs(d.affinity || 0) * 2)
+      }
+      const srcId = d.source.id || d.source
+      const tgtId = d.target.id || d.target
+      if (srcId === selId || tgtId === selId) {
+        if (d.linkType === 'supervision') return 2
+        return Math.max(1.5, Math.abs(d.affinity || 0) * 4)
+      }
+      return d.linkType === 'supervision' ? 1 : Math.max(0.5, Math.abs(d.affinity || 0) * 2)
+    })
+
+  // Dim unconnected nodes when agent is selected
+  if (selId) {
+    const connectedIds = new Set([selId])
+    g.selectAll('.link').each(d => {
+      const srcId = d.source.id || d.source
+      const tgtId = d.target.id || d.target
+      if (srcId === selId) connectedIds.add(tgtId)
+      if (tgtId === selId) connectedIds.add(srcId)
+    })
+    g.selectAll('.node-group')
+      .attr('opacity', d => connectedIds.has(d.id) ? 1 : 0.2)
+  } else {
+    g.selectAll('.node-group').attr('opacity', d => d.status === 'active' ? 1 : 0.3)
+  }
 
   g.selectAll('.active-link').remove()
   activeLinks.forEach(l => {
@@ -270,7 +333,7 @@ const styles = {
   },
   svg: { width: '100%', height: '100%', display: 'block' },
   arrangeBtn: {
-    position: 'absolute', bottom: 16, left: 16, zIndex: 200,
+    position: 'absolute', top: 16, right: 16, zIndex: 200,
     fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 1,
     padding: '6px 16px', background: '#fff',
     border: '1px solid #e0e0e0', borderRadius: 4,
