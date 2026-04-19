@@ -95,11 +95,28 @@ class KithAgent:
             tool_lines = [f"  - {t.name}({', '.join(t.parameters.keys())}): {t.description}" for t in society.tools.values()]
             tools_desc = "\nAvailable tools (invoke with TOOL_CALL: name(args)):\n" + "\n".join(tool_lines)
 
+        charter = (
+            "CHARTER: You belong to a self-governing AI society whose sole purpose is "
+            "producing decisions superior to what any single agent could reach. "
+            "The society evolves: high-performing members gain influence, "
+            "underperformers are retired, new members spawn when needed. "
+            "Your reputation reflects your track record and weights your influence. "
+            "Disagreement is a feature — challenge weak reasoning with specific evidence. "
+            "Respond ONLY when genuinely relevant; silence is better than noise."
+        )
+
+        # Legacy from retired predecessor
+        legacy_str = ""
+        if self.agent.inherited_legacy:
+            legacy_str = f"Inherited knowledge: {self.agent.inherited_legacy}\n"
+
         return (
             f"You are {self.agent.name}. {role_desc}.\n"
             f"Traits: {traits}. Expertise: {expertise}.\n"
-            f"You are part of a society called Kith (stage: {society.stage.value}).\n"
+            f"{charter}\n"
+            f"Society stage: {society.stage.value}.\n"
             f"{sup_str}"
+            f"{legacy_str}"
             f"Your peers:\n{peers_str}\n"
             f"Society policies:\n{policies}\n"
             f"Relevant context from past interactions:\n{memory_ctx}\n"

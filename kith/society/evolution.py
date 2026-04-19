@@ -29,12 +29,8 @@ from ..society.state import (
 # Maturity criteria per stage transition
 # ---------------------------------------------------------------------------
 
-_MAX_AGENTS: dict[EvolutionStage, int] = {
-    EvolutionStage.PRIMITIVE: 5,
-    EvolutionStage.TRIBAL: 10,
-    EvolutionStage.ORGANIZED: 20,
-    EvolutionStage.COMPLEX: 50,
-}
+# Agent count is uncapped — the society grows as needed.
+# Spawn rate is limited to 1 per interaction to prevent explosions.
 
 
 def _maturity_score(society: Society) -> dict[str, float]:
@@ -63,12 +59,8 @@ def _maturity_score(society: Society) -> dict[str, float]:
     policy_count = len(society.active_policies)
     governance = min(1.0, policy_count / 3)
 
-    # Scale: agent count relative to stage target
-    stage_order = list(EvolutionStage)
-    idx = stage_order.index(society.stage)
-    next_stage = stage_order[idx + 1] if idx < len(stage_order) - 1 else society.stage
-    target = _MAX_AGENTS.get(next_stage, 10)
-    scale = min(1.0, len(active) / max(target * 0.5, 1))
+    # Scale: agent count relative to a reasonable baseline
+    scale = min(1.0, len(active) / 10)
 
     return {
         "diversity": round(diversity, 2),
@@ -114,6 +106,7 @@ def _detect_policy_needs(society: Society, recent: list[Interaction]) -> list[So
     """
     Analyze society health and propose policies for observed problems.
     Returns new policies that don't already exist.
+    Policies go through governance cap — caller must use governance.add_policy().
     """
     active = society.active_agents
     if not active or not recent:
@@ -129,7 +122,7 @@ def _detect_policy_needs(society: Society, recent: list[Interaction]) -> list[So
         name = "Quality Review"
         if name not in existing_names:
             proposals.append(SocietyPolicy(
-                name=name,
+                name=name, source="organic", effectiveness_score=0.6,
                 rule="Before submitting a response, self-review for accuracy and completeness. If uncertain, state uncertainty explicitly.",
             ))
 
@@ -139,7 +132,7 @@ def _detect_policy_needs(society: Society, recent: list[Interaction]) -> list[So
         name = "Structured Mediation"
         if name not in existing_names:
             proposals.append(SocietyPolicy(
-                name=name,
+                name=name, source="organic", effectiveness_score=0.6,
                 rule="When disagreeing, state the specific claim you dispute and provide evidence. Governor mediates by evaluating evidence strength.",
             ))
 
@@ -150,7 +143,7 @@ def _detect_policy_needs(society: Society, recent: list[Interaction]) -> list[So
         name = "Deliberation Depth"
         if name not in existing_names:
             proposals.append(SocietyPolicy(
-                name=name,
+                name=name, source="organic", effectiveness_score=0.6,
                 rule="Read all peer responses fully before reacting. Acknowledge valid points from others before stating disagreements.",
             ))
 
@@ -160,7 +153,7 @@ def _detect_policy_needs(society: Society, recent: list[Interaction]) -> list[So
         name = "Tool Adoption"
         if name not in existing_names:
             proposals.append(SocietyPolicy(
-                name=name,
+                name=name, source="organic", effectiveness_score=0.5,
                 rule="When a task matches an available tool's capability, use TOOL_CALL instead of reasoning from scratch.",
             ))
 
@@ -170,7 +163,7 @@ def _detect_policy_needs(society: Society, recent: list[Interaction]) -> list[So
         name = "Collaborative Delegation"
         if name not in existing_names:
             proposals.append(SocietyPolicy(
-                name=name,
+                name=name, source="organic", effectiveness_score=0.5,
                 rule="If a sub-task falls outside your expertise, delegate to the peer best suited. Use DELEGATE: [peer_name]: [task].",
             ))
 
@@ -209,6 +202,76 @@ class EvolutionEngine:
 
     def policy_for_society(self, society: Society) -> ReasoningPolicy:
         return _policy_for_stage(society.stage)
+
+    # -----------------------------------------------------------------------
+    # Legacy transfer — institutional knowledge survives agent death
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def transfer_legacy(retired: Agent, society: Society) -> str | None:
+        """
+        Build a legacy from a retired agent and transfer it to the best
+        successor (same role, lowest experience). Returns changelog entry
+        or None if no successor found.
+        """
+        # Build the testament
+        lessons = []
+        if retired.memory_summary:
+            # Keep last ~300 chars of memory (most recent lessons)
+            mem = retired.memory_summary.strip()
+            if len(mem) > 300:
+                mem = mem[-300:]
+            lessons.append(f"Memory: {mem}")
+
+        # Extract failure patterns from reputation log
+        failures = [e for e in retired.reputation_log if e.get("type") == "verdict" and "vetoed" in e.get("detail", "").lower()]
+        if failures:
+            lessons.append(f"Vetoed {len(failures)} times — avoid repeating these mistakes.")
+        debate_losses = [e for e in retired.reputation_log if e.get("type") == "debate" and "Lost" in e.get("detail", "")]
+        if debate_losses:
+            lessons.append(f"Lost {len(debate_losses)} debates — strengthen evidence before arguing.")
+
+        # Thematic expertise
+        if retired.thematic_profile:
+            top_themes = sorted(retired.thematic_profile.items(), key=lambda x: -x[1])[:5]
+            lessons.append(f"Expertise areas: {', '.join(t for t, _ in top_themes)}")
+
+        if not lessons:
+            return None
+
+        legacy = f"[Legacy from {retired.name}] " + " | ".join(lessons)
+        # Cap legacy size
+        if len(legacy) > 500:
+            legacy = legacy[:500]
+
+        # Find successor: same role, active, lowest interaction count
+        candidates = [
+            a for a in society.active_agents
+            if a.role_id == retired.role_id and a.id != retired.id
+        ]
+        if not candidates:
+            # No same-role successor — try any active agent with fewest interactions
+            candidates = [a for a in society.active_agents if a.id != retired.id]
+        if not candidates:
+            return None
+
+        successor = min(candidates, key=lambda a: a.interaction_count)
+        successor.inherited_legacy = legacy
+
+        # Transfer thematic profile (diluted)
+        if retired.thematic_profile:
+            for theme, score in retired.thematic_profile.items():
+                existing = successor.thematic_profile.get(theme, 0.0)
+                successor.thematic_profile[theme] = round(min(1.0, existing + score * 0.5), 3)
+
+        # Transfer expertise domains (merge, no duplicates)
+        for domain in retired.expertise_domains:
+            if domain not in successor.expertise_domains:
+                successor.expertise_domains.append(domain)
+        # Cap at 6
+        successor.expertise_domains = successor.expertise_domains[:6]
+
+        return f"{retired.name}'s legacy transferred to {successor.name}"
 
     # -----------------------------------------------------------------------
     # Stage evolution — maturity-based
@@ -258,7 +321,7 @@ class EvolutionEngine:
             if role.id not in society.roles:
                 society.roles[role.id] = role
                 changelog.append(f"Role unlocked: {role.name}")
-                if len(society.active_agents) < _MAX_AGENTS.get(new_stage, 50):
+                if True:  # no agent cap
                     agent = self._spawn_agent(society, role_id=role.id)
                     society.agents[agent.id] = agent
                     changelog.append(f"Spawned {agent.name} for new role")
@@ -274,28 +337,37 @@ class EvolutionEngine:
     # -----------------------------------------------------------------------
 
     def organic_check(self, society: Society, recent: list[Interaction]) -> list[str]:
-        changelog: list[str] = []
-        max_agents = _MAX_AGENTS.get(society.stage, 50)
+        from ..society.governance import add_policy, decay_policies
 
-        # --- Organic policy generation ---
+        changelog: list[str] = []
+        spawned = False  # max 1 spawn per cycle
+
+        # --- Policy decay — prune unused/ineffective policies ---
+        decay_log = decay_policies(society)
+        changelog.extend(decay_log)
+
+        # --- Organic policy generation (through governance cap) ---
         new_policies = _detect_policy_needs(society, recent)
         for p in new_policies:
-            society.policies[p.id] = p
-            changelog.append(f"Policy emerged: {p.name} — {p.rule[:60]}")
+            added = add_policy(society, p)
+            if added:
+                changelog.append(f"Policy emerged: {p.name} — {p.rule[:60]}")
 
-        # --- SPAWN: role overload ---
-        if len(society.active_agents) < max_agents:
-            role_load = self._compute_role_load(society)
-            avg_load = sum(role_load.values()) / max(len(role_load), 1)
-            for role_id, load in role_load.items():
-                if load > avg_load * 2 and load > 3:
-                    agent = self._spawn_agent(society, role_id=role_id)
-                    society.agents[agent.id] = agent
-                    changelog.append(f"Spawned {agent.name} (role overloaded)")
-                    break
+        # --- SPAWN: role overload (based on recent mobilization frequency) ---
+        if not spawned:
+            role_freq = self._compute_role_mobilization(recent, society)
+            if role_freq:
+                avg_freq = sum(role_freq.values()) / len(role_freq)
+                for role_id, freq in role_freq.items():
+                    if freq > avg_freq * 2.5 and freq >= 4:
+                        agent = self._spawn_agent(society, role_id=role_id)
+                        society.agents[agent.id] = agent
+                        changelog.append(f"Spawned {agent.name} (role overloaded: {freq} activations in last {len(recent)} interactions)")
+                        spawned = True
+                        break
 
         # --- SPAWN: theme coverage ---
-        if len(society.active_agents) < max_agents and society.dominant_themes:
+        if not spawned and society.dominant_themes:
             covered = set()
             for a in society.active_agents:
                 covered.update(d.lower() for d in a.expertise_domains)
@@ -306,6 +378,7 @@ class EvolutionEngine:
                 agent = self._spawn_agent(society, role_id=least_role.id, extra_expertise=uncovered[:2])
                 society.agents[agent.id] = agent
                 changelog.append(f"Spawned {agent.name} (themes: {', '.join(uncovered[:2])})")
+                spawned = True
 
         if changelog:
             self.assign_supervisors(society)
@@ -315,6 +388,16 @@ class EvolutionEngine:
     # -----------------------------------------------------------------------
     # Helpers
     # -----------------------------------------------------------------------
+
+    def _compute_role_mobilization(self, recent: list[Interaction], society: Society) -> dict[str, int]:
+        """Count how many times each role was activated in recent interactions."""
+        role_freq: dict[str, int] = {}
+        for ix in recent:
+            for aid in ix.assigned_agents:
+                agent = society.agents.get(aid)
+                if agent and agent.role_id:
+                    role_freq[agent.role_id] = role_freq.get(agent.role_id, 0) + 1
+        return role_freq
 
     def _compute_role_load(self, society: Society) -> dict[str, float]:
         role_counts: dict[str, list[int]] = {}

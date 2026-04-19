@@ -92,6 +92,17 @@ class Agent(BaseModel):
     # Reputation event log — why the score is what it is
     reputation_log: list[dict[str, Any]] = Field(default_factory=list)
 
+    # Thematic profile — emergent topic affinity {theme: score}
+    # Updated after each interaction based on participation + outcome quality
+    thematic_profile: dict[str, float] = Field(default_factory=dict)
+
+    # Attention economy — consecutive activation tracking
+    consecutive_activations: int = 0      # how many prompts in a row this agent was activated
+    recent_themes: list[str] = Field(default_factory=list)  # themes of last 3 activations
+
+    # Legacy — inherited knowledge from retired predecessor
+    inherited_legacy: str = ""
+
 
 # ---------------------------------------------------------------------------
 # Society
@@ -105,6 +116,10 @@ class SocietyPolicy(BaseModel):
     applies_to_roles: list[str] = Field(default_factory=list)  # empty = all
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     active: bool = True
+    source: str = "organic"            # organic | retrospective | manual
+    created_at_interaction: int = 0    # society.total_interactions when created
+    last_relevant_at: int = 0          # last interaction where this policy was relevant
+    effectiveness_score: float = 0.5   # 0.0-1.0, decays if unused
 
 
 class Society(BaseModel):

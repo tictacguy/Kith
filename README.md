@@ -15,9 +15,9 @@
 
 ---
 
-Kith is a decision-making engine built on a persistent society of AI agents. Instead of routing your question to a single model, Kith mobilizes a society that deliberates, debates, delegates, and reaches consensus — producing decisions that are more robust, more diverse, and more thoroughly examined than any single agent could achieve.
+Kith is a decision-making engine built on a persistent society of AI agents. Instead of routing your question to a single model, Kith mobilizes a society that deliberates, challenges, and converges — producing decisions that are more robust, more diverse, and more thoroughly examined than any single agent could achieve.
 
-The society persists across sessions. It develops internal policies from observed problems, promotes high-performing agents and retires underperformers, builds bilateral trust relationships between members, and periodically self-reflects on its own decision quality. Every decision is informed by vectorized institutional memory — not a static summary, but semantically retrieved facts relevant to the question at hand.
+The society persists across sessions. It develops internal policies from observed problems, promotes high-performing agents and retires underperformers, builds bilateral trust relationships between members, transfers institutional knowledge when agents are retired, and periodically self-reflects on its own decision quality. Every decision is informed by vectorized institutional memory — not a static summary, but semantically retrieved facts relevant to the question at hand.
 
 Internal communication uses [caveman](https://github.com/JuliusBrussee/caveman) compression (~70% token savings). Reasoning is governed by [Meta-Reasoning](https://github.com/tictacguy/meta-reasoning), an SDK that controls cognitive dynamics through formal policies and mutation operators. The final response to the user is always clear, well-structured prose.
 
@@ -25,15 +25,18 @@ Internal communication uses [caveman](https://github.com/JuliusBrussee/caveman) 
 
 Traditional AI assistants give you one perspective from one model. Kith gives you a **decision process**:
 
-- A **Scout** explores unconventional angles your team might miss
-- A **Critic** finds flaws in the reasoning before you act on it
-- A **Builder** translates abstract ideas into concrete implementation plans
-- An **Elder** synthesizes conflicting viewpoints into a coherent recommendation
-- A **Tool Smith** analyzes patterns and proposes new tools for the society
-- A **Governor** enforces quality standards and mediates unresolved disputes
-- An **Analyst** provides data-driven insights and quantitative evaluation
+| Role | Stage | Purpose |
+|------|-------|---------|
+| **Elder** | Primitive | Synthesizes conflicting viewpoints into a coherent recommendation |
+| **Scout** | Primitive | Explores unconventional angles your team might miss |
+| **Builder** | Primitive | Translates abstract ideas into concrete implementation plans |
+| **Critic** | Tribal | Finds flaws in reasoning, red-teams the emerging consensus |
+| **Tool Smith** | Tribal | Analyzes patterns and proposes new tools for the society |
+| **Governor** | Organized | Enforces quality standards and mediates unresolved disputes |
+| **Analyst** | Organized | Provides data-driven insights and quantitative evaluation |
+| **Historian** | System | Extracts facts, maintains vectorized memory (◑ in the graph) |
 
-The society doesn't just answer — it **argues, challenges, and converges**. You see the final recommendation, but behind it is a structured process of mobilization, deliberation, debate, and weighted consensus.
+The society doesn't just answer — it **frames, challenges, and converges**. The final recommendation includes the reasoning, the process, and any dissenting views or risks identified.
 
 ## Frontend
 
@@ -41,15 +44,16 @@ The society doesn't just answer — it **argues, challenges, and converges**. Yo
   <img src="static/screen.png" alt="Kith UI" width="100%" />
 </p>
 
-The interface is a real-time visualization of the society. A D3 force-directed graph shows agents as nodes, bilateral relationships as colored links (green for allies, red for rivals), and tools as blue nodes. Everything updates live via WebSocket — no polling.
+The interface is a real-time visualization of the society. A D3 force-directed graph shows agents as nodes and bilateral relationships as colored links (green for allies, red for rivals). When the society grows beyond 12 agents, nodes are automatically clustered by role — click a cluster to expand. Everything updates live via WebSocket.
 
-- **Graph canvas** — drag, zoom, click any agent to inspect. Historian visible as a system entity (◑)
-- **Console tab** — live event feed: mobilization, deliberation, debate, consensus, evolution events
-- **Entities tab** — agent list with reputation scores, role badges, rename and reassign controls
-- **Memory tab** — vectorized facts, retrospective reports, society summary
-- **Config tab** — switch LLM provider and model at runtime with one click
-- **Chat input** — bottom-center of the canvas, auto-grows as you type
-- **Response sheet** — slides up from the bottom with the final synthesized recommendation
+- **Graph canvas** — drag, zoom, click any agent to inspect. Historian visible as a system entity (◑). Clusters collapse/expand on click.
+- **Console tab** — live event feed: mobilization, deliberation, debate, convergence, evolution events (blue), retrospective actions
+- **Entities tab** — agent list with reputation scores, thematic affinity tags, cooldown indicators, legacy badges
+- **Memory tab** — vectorized facts, retrospective reports, society summary, active policies with source and effectiveness score
+- **Tools tab** — tools proposed by the Tool Smith with parameters, usage count, and creation date
+- **Settings** — switch LLM provider and model at runtime (opens as overlay from header)
+- **Chat input** — bottom-center of the canvas
+- **Response sheet** — slides up with the final synthesized recommendation, including process transparency and risk caveats
 
 ## Quick Start
 
@@ -105,52 +109,107 @@ cd frontend && npm install && npm run dev
 
 ## How It Works
 
-### Decision Lifecycle
+### Decision Pipeline
 
-Every question goes through a structured decision process. The depth of the process scales automatically with the complexity of the question.
+Every question goes through a structured decision process. The depth scales automatically with complexity.
 
 ```
 Question arrives
        │
-  MOBILIZATION ── each agent self-evaluates relevance
-       │           simple question → 1 agent responds directly
-       │           complex question → full society mobilizes
+  FRAMING ── identify decision dimensions (cost, risk, timeline...)
+       │      simple questions skip this step
        │
-  INITIAL ANALYSIS ── activated agents reason independently
+  MOBILIZATION ── each agent bids on relevance
+       │           bid = 60% LLM self-assessment + 40% thematic affinity
+       │           attention economy: consecutive activations penalized
+       │           simple question → 1 agent (SOLO)
+       │           complex question → full society (COUNCIL)
        │
-  DELIBERATION ── agents read each other's positions and react
-       │           can DELEGATE sub-tasks to better-suited peers
-       │           can DISAGREE and trigger structured debates
+  PARALLEL RESPONSES ── activated agents reason independently
+       │                  each sees: charter, framing, relevant memory, policies, legacy
        │
-  DEBATE ── disagreeing pairs argue with evidence
+  DELIBERATION ── agents read peers and update positions
+       │           can CHALLENGE specific reasoning flaws (max 1 per agent)
+       │
+  DEBATE ── challenged pairs argue with evidence (max 3 debates)
        │    Governor mediates and rules
        │
-  CONSENSUS ── agents vote (weighted by reputation)
-       │        high-reputation agents have more influence
+  CONVERGENCE ── consensus inferred from updated positions
+       │          no explicit voting — alignment measured naturally
        │
-  SUPERVISION ── supervisors review subordinate positions
+  RED TEAM ── Critic stress-tests the emerging position
+       │       identifies blind spots, flaws, risks
        │
-  SYNTHESIS ── final recommendation in clear prose
+  SYNTHESIS ── structured recommendation for the user:
+       │        1. Recommendation
+       │        2. Key reasoning
+       │        3. How the society reached this conclusion
+       │        4. Risks and caveats (from red team + dissenters)
        │
-  HISTORIAN ── extracts facts, updates vectorized memory
+  HISTORIAN ── extracts facts, vectorizes in ChromaDB
+       │
+  EVOLUTION ── reputation updates, policy lifecycle, organic spawning
        │
   RETROSPECTIVE ── society self-reflects every 10 decisions
 ```
 
+### Mobilization Levels
+
+| Level | Agents | Pipeline |
+|-------|--------|----------|
+| SOLO | 1 | Direct response, no deliberation |
+| PAIR | 2 | Responses + synthesis |
+| TEAM | 3-4 | Deliberation without debate |
+| COUNCIL | 5+ | Full pipeline: deliberation + debate + red team |
+
+### Society Charter
+
+Every agent knows it belongs to a self-governing society. The charter is injected into every prompt:
+
+> You belong to a self-governing AI society whose sole purpose is producing decisions superior to what any single agent could reach. The society evolves: high-performing members gain influence, underperformers are retired, new members spawn when needed. Disagreement is a feature — challenge weak reasoning with specific evidence. Respond ONLY when genuinely relevant; silence is better than noise.
+
+### Thematic Clusters
+
+Agents develop thematic profiles from participation history. When a new prompt arrives, agents with high thematic affinity get a mobilization boost — pure vector similarity, zero extra LLM calls. If you use Kith for tech, business, and legal decisions, agents naturally specialize and the right ones activate for each domain.
+
+### Attention Economy
+
+Agents activated 3+ times in a row get diminishing bid scores (15% penalty per consecutive activation beyond 2, cap -40%). This forces perspective rotation and prevents the same agents from dominating every decision.
+
+### Legacy Transfer
+
+When an agent is retired for low reputation, its knowledge is condensed into a testament and transferred to a successor: memory, failure patterns, thematic expertise. Institutional knowledge survives agent death.
+
+### Policy Governance
+
+Policies are capped per stage (PRIMITIVE: 1, TRIBAL: 3, ORGANIZED: 5, COMPLEX: 7). Each policy has an effectiveness score that decays if unused. Policies idle for 15+ interactions expire automatically. Sources: organic (from metrics), retrospective (from self-reflection), manual (from user).
+
+### Bilateral Relationships
+
+Every pair of agents has an affinity score [-1.0, 1.0]. Co-participation, consensus alignment, and supervision approval build trust. Debate losses and supervision vetoes create friction. Relationships influence mobilization — strong allies get pulled in together.
+
 ### Vectorized Memory
 
-The Historian extracts discrete facts from every interaction and vectorizes them individually in ChromaDB. When a new question arrives, only semantically relevant facts are retrieved — no global summary polluting unrelated decisions.
+The Historian extracts discrete facts from every interaction and vectorizes them individually in ChromaDB. When a new question arrives, only semantically relevant facts are retrieved — no global summary polluting unrelated decisions. The society summary in the UI is reconstructed from recent facts for human readability, but is never injected into agent prompts.
 
-Facts include rich metadata: participating agents, themes, tools used, society stage. The society summary displayed in the UI is reconstructed from recent facts for human readability, but is never injected into agent prompts.
+### Organic Evolution
+
+The society grows without hard caps. Spawn triggers:
+
+- **Role overload** — if a role is mobilized > 2.5x the average in recent interactions, a new agent is spawned for that role
+- **Theme coverage** — if 2+ dominant themes aren't covered by any agent's expertise, a new agent is spawned with those themes
+- **Stage evolution** — advancing stages (Primitive → Tribal → Organized → Complex) unlocks new roles and spawns agents for them
+
+Max 1 spawn per interaction to prevent explosions.
 
 ### Storage
 
-- **SQLite** — structured state (agents, roles, tools, policies, interactions)
+- **SQLite** — structured state (agents, roles, tools, policies, interactions, relationships, thematic profiles)
 - **ChromaDB** — vectorized memory (all-MiniLM-L6-v2 via built-in ONNX)
 
 ### LLM Providers
 
-Switchable at runtime from the frontend config panel.
+Switchable at runtime from the Settings panel.
 
 | Provider | Variables |
 |----------|-----------|

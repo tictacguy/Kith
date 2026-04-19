@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback } from 'react'
+import { useRef, useEffect, useCallback, useState } from 'react'
 import * as d3 from 'd3'
 
 const ROLE_SHAPES = {
@@ -7,6 +7,7 @@ const ROLE_SHAPES = {
   Historian: '◑',
 }
 const STATUS_OPACITY = { active: 1, dormant: 0.3, retired: 0.15 }
+const CLUSTER_THRESHOLD = 12 // collapse into clusters above this agent count
 
 export default function SocietyGraph({ state, selectedAgent, onSelectAgent, activeAgents, activeLinks }) {
   const svgRef = useRef(null)
@@ -16,28 +17,30 @@ export default function SocietyGraph({ state, selectedAgent, onSelectAgent, acti
   const linksRef = useRef([])
   const initRef = useRef(false)
   const zoomRef = useRef(null)
+  const [expandedClusters, setExpandedClusters] = useState(new Set())
+
+  const toggleCluster = useCallback((role) => {
+    setExpandedClusters(prev => {
+      const next = new Set(prev)
+      if (next.has(role)) next.delete(role)
+      else next.add(role)
+      return next
+    })
+  }, [])
 
   // -----------------------------------------------------------------------
-  // Arrange — cluster agents by role, tools separate
+  // Arrange
   // -----------------------------------------------------------------------
   const arrange = useCallback(() => {
     const nodes = nodesRef.current
     if (!nodes.length || !svgRef.current) return
-
     const { width, height } = svgRef.current.getBoundingClientRect()
     const cx = width / 2, cy = height / 2
-
-    // Pull all nodes toward center as a compact group
     nodes.forEach(n => {
       n.fx = cx + (Math.random() - 0.5) * 40
       n.fy = cy + (Math.random() - 0.5) * 40
     })
-
-    if (simRef.current) {
-      simRef.current.alpha(0.8).restart()
-    }
-
-    // Release after they converge — forces will spread them naturally
+    if (simRef.current) simRef.current.alpha(0.8).restart()
     setTimeout(() => {
       nodes.forEach(n => { n.fx = null; n.fy = null })
       if (simRef.current) simRef.current.alpha(0.3).restart()
@@ -45,7 +48,118 @@ export default function SocietyGraph({ state, selectedAgent, onSelectAgent, acti
   }, [])
 
   // -----------------------------------------------------------------------
-  // Build / update graph
+  // Build nodes — clustered or flat depending on agent count
+  // -----------------------------------------------------------------------
+  const buildGraphData = useCallback((state, expandedClusters) => {
+    const agents = state.agents || []
+    const tools = state.tools || [] // used by parent, not rendered in graph
+    const realAgents = agents.filter(a => a.node_type !== 'system')
+    const systemAgents = agents.filter(a => a.node_type === 'system')
+    const useClusters = realAgents.length > CLUSTER_THRESHOLD
+
+    const existingMap = Object.fromEntries(nodesRef.current.map(n => [n.id, n]))
+    const newNodes = []
+
+    if (useClusters) {
+      // Group agents by role
+      const byRole = {}
+      realAgents.forEach(a => {
+        const role = a.role || 'unknown'
+        if (!byRole[role]) byRole[role] = []
+        byRole[role].push(a)
+      })
+
+      Object.entries(byRole).forEach(([role, members]) => {
+        if (expandedClusters.has(role)) {
+          // Expanded — show individual agents
+          members.forEach(a => {
+            const existing = existingMap[a.id]
+            newNodes.push({
+              id: a.id, name: a.name, role: a.role || '—', status: a.status,
+              interactions: a.interaction_count, supervisorId: a.supervisor_id,
+              nodeType: 'agent', clustered: false,
+              x: existing?.x, y: existing?.y, fx: existing?.fx, fy: existing?.fy,
+            })
+          })
+        } else {
+          // Collapsed — single cluster node
+          const clusterId = `cluster:${role}`
+          const existing = existingMap[clusterId]
+          const avgRep = members.reduce((s, a) => s + (a.reputation || 0.5), 0) / members.length
+          newNodes.push({
+            id: clusterId, name: `${role} (${members.length})`, role,
+            status: 'active', interactions: members.reduce((s, a) => s + a.interaction_count, 0),
+            nodeType: 'cluster', memberCount: members.length, avgReputation: avgRep,
+            memberIds: members.map(a => a.id),
+            x: existing?.x, y: existing?.y, fx: existing?.fx, fy: existing?.fy,
+          })
+        }
+      })
+    } else {
+      // Flat — all agents visible
+      realAgents.forEach(a => {
+        const existing = existingMap[a.id]
+        newNodes.push({
+          id: a.id, name: a.name, role: a.role || '—', status: a.status,
+          interactions: a.interaction_count, supervisorId: a.supervisor_id,
+          nodeType: 'agent', clustered: false,
+          x: existing?.x, y: existing?.y, fx: existing?.fx, fy: existing?.fy,
+        })
+      })
+    }
+
+    // System entities (Historian)
+    systemAgents.forEach(a => {
+      const existing = existingMap[a.id]
+      newNodes.push({
+        id: a.id, name: a.name, role: a.role || '—', status: a.status,
+        interactions: a.interaction_count, nodeType: 'system',
+        x: existing?.x, y: existing?.y, fx: existing?.fx, fy: existing?.fy,
+      })
+    })
+
+    // (Tools are shown in the Tools tab, not in the graph)
+
+    // Links
+    const nodeIds = new Set(newNodes.map(n => n.id))
+    const newLinks = []
+
+    // Supervision links (only between visible nodes)
+    newNodes.forEach(n => {
+      if (n.supervisorId && nodeIds.has(n.supervisorId))
+        newLinks.push({ source: n.supervisorId, target: n.id, linkType: 'supervision' })
+    })
+
+    // Relationship links
+    const relationships = state.relationships || []
+    relationships.forEach(r => {
+      if (r.agents?.length !== 2) return
+      let src = r.agents[0], tgt = r.agents[1]
+
+      // If either agent is inside a collapsed cluster, link to the cluster node
+      if (!nodeIds.has(src)) {
+        const cluster = newNodes.find(n => n.nodeType === 'cluster' && n.memberIds?.includes(src))
+        if (cluster) src = cluster.id; else return
+      }
+      if (!nodeIds.has(tgt)) {
+        const cluster = newNodes.find(n => n.nodeType === 'cluster' && n.memberIds?.includes(tgt))
+        if (cluster) tgt = cluster.id; else return
+      }
+      if (src === tgt) return // same cluster
+      if (!nodeIds.has(src) || !nodeIds.has(tgt)) return
+
+      newLinks.push({
+        source: src, target: tgt,
+        linkType: r.affinity > 0 ? 'trust' : 'distrust',
+        affinity: r.affinity,
+      })
+    })
+
+    return { nodes: newNodes, links: newLinks }
+  }, [])
+
+  // -----------------------------------------------------------------------
+  // Main effect — build/update graph
   // -----------------------------------------------------------------------
   useEffect(() => {
     if (!svgRef.current || !state?.agents?.length) return
@@ -72,67 +186,32 @@ export default function SocietyGraph({ state, selectedAgent, onSelectAgent, acti
     }
 
     const g = gRef.current
-    const agents = state.agents || []
-    const tools = state.tools || []
-
-    const existingMap = Object.fromEntries(nodesRef.current.map(n => [n.id, n]))
-    const newNodes = agents.map(a => {
-      const existing = existingMap[a.id]
-      const nt = a.node_type === 'system' ? 'system' : 'agent'
-      return {
-        id: a.id, name: a.name, role: a.role || '—', status: a.status,
-        interactions: a.interaction_count, supervisorId: a.supervisor_id, nodeType: nt,
-        x: existing?.x ?? undefined, y: existing?.y ?? undefined,
-        fx: existing?.fx, fy: existing?.fy,
-      }
-    })
-    tools.forEach(t => {
-      const existing = existingMap[`tool:${t.id}`]
-      newNodes.push({
-        id: `tool:${t.id}`, name: t.name, role: 'tool', status: 'active',
-        interactions: t.usage_count || 0, nodeType: 'tool',
-        x: existing?.x ?? undefined, y: existing?.y ?? undefined,
-        fx: existing?.fx, fy: existing?.fy,
-      })
-    })
+    const { nodes: newNodes, links: newLinks } = buildGraphData(state, expandedClusters)
     nodesRef.current = newNodes
-
-    const nodeIds = new Set(newNodes.map(n => n.id))
-    const newLinks = []
-    newNodes.forEach(n => {
-      if (n.supervisorId && nodeIds.has(n.supervisorId))
-        newLinks.push({ source: n.supervisorId, target: n.id, linkType: 'supervision' })
-    })
-    // Add relationship links (trust/distrust)
-    const relationships = state.relationships || []
-    relationships.forEach(r => {
-      if (r.agents?.length === 2 && nodeIds.has(r.agents[0]) && nodeIds.has(r.agents[1])) {
-        newLinks.push({
-          source: r.agents[0], target: r.agents[1],
-          linkType: r.affinity > 0 ? 'trust' : 'distrust',
-          affinity: r.affinity,
-        })
-      }
-    })
     linksRef.current = newLinks
 
     if (simRef.current) {
-      simRef.current.nodes(newNodes)
-      simRef.current.force('link').links(newLinks)
-      simRef.current.alpha(0.15).restart()
-    } else {
-      const sim = d3.forceSimulation(newNodes)
-        .force('link', d3.forceLink(newLinks).id(d => d.id).distance(110))
-        .force('charge', d3.forceManyBody().strength(-250))
-        .force('center', d3.forceCenter(width / 2, height / 2))
-        .force('collide', d3.forceCollide(45))
-        .velocityDecay(0.6)
-      simRef.current = sim
-      sim.on('tick', () => renderTick(g, newNodes, newLinks))
+      simRef.current.stop()
+      simRef.current = null
     }
 
-    renderGraph(g, newNodes, newLinks, selectedAgent, onSelectAgent, agents)
-  }, [state])
+    const sim = d3.forceSimulation(newNodes)
+      .force('link', d3.forceLink(newLinks).id(d => d.id).distance(d =>
+        d.source?.nodeType === 'cluster' || d.target?.nodeType === 'cluster' ? 140 : 110
+      ))
+      .force('charge', d3.forceManyBody().strength(d =>
+        d.nodeType === 'cluster' ? -400 : -250
+      ))
+      .force('center', d3.forceCenter(width / 2, height / 2))
+      .force('collide', d3.forceCollide(d =>
+        d.nodeType === 'cluster' ? 60 : 45
+      ))
+      .velocityDecay(0.6)
+    simRef.current = sim
+    sim.on('tick', () => renderTick(g, newNodes, newLinks))
+
+    renderGraph(g, newNodes, newLinks, selectedAgent, onSelectAgent, state.agents, toggleCluster)
+  }, [state, expandedClusters])
 
   useEffect(() => {
     if (!gRef.current || !nodesRef.current.length) return
@@ -143,17 +222,14 @@ export default function SocietyGraph({ state, selectedAgent, onSelectAgent, acti
     <div style={styles.container}>
       <svg ref={svgRef} style={styles.svg} />
 
-      {/* Arrange button — top right */}
+      {/* Arrange button */}
       <button onClick={arrange} style={styles.arrangeBtn}>Arrange</button>
 
-      {/* Legend — top left */}
+      {/* Legend */}
       <div style={styles.legend}>
         {Object.entries(ROLE_SHAPES).map(([role, shape]) => (
-          <span key={role} style={styles.legendItem}>
-            <span style={{ fontSize: 14 }}>{shape}</span> {role}
-          </span>
+        <span style={styles.legendItem}><span style={{ fontSize: 14 }}>{shape}</span> {role}</span>
         ))}
-        <span style={styles.legendItem}><span style={{ fontSize: 14 }}>⬡</span> Tool</span>
       </div>
 
       {(!state?.agents?.length) && (
@@ -163,7 +239,15 @@ export default function SocietyGraph({ state, selectedAgent, onSelectAgent, acti
   )
 }
 
-function renderGraph(g, nodes, links, selectedAgent, onSelectAgent, rawAgents) {
+function nodeRadius(d) {
+  if (d.nodeType === 'cluster') return 20 + Math.min(d.memberCount * 3, 20)
+  if (d.nodeType === 'tool') return 12
+  if (d.nodeType === 'system') return 14
+  return 8 + Math.min(d.interactions * 2, 16)
+}
+
+function renderGraph(g, nodes, links, selectedAgent, onSelectAgent, rawAgents, toggleCluster) {
+  // Links
   const linkSel = g.selectAll('.link').data(links, d => `${d.source.id || d.source}-${d.target.id || d.target}`)
   linkSel.exit().remove()
   linkSel.enter().append('line')
@@ -183,31 +267,31 @@ function renderGraph(g, nodes, links, selectedAgent, onSelectAgent, rawAgents) {
 
   g.selectAll('.active-link').remove()
 
+  // Nodes
   const nodeSel = g.selectAll('.node-group').data(nodes, d => d.id)
   nodeSel.exit().remove()
 
   const enter = nodeSel.enter().append('g').attr('class', 'node-group').style('cursor', 'pointer')
 
   enter.append('circle').attr('class', 'node-circle')
-    .attr('fill', d => d.nodeType === 'tool' ? 'rgba(0,102,204,0.08)' : d.nodeType === 'system' ? '#f0f0f0' : '#fff')
-    .attr('stroke', d => d.nodeType === 'tool' ? '#0066cc' : '#999').attr('stroke-width', 1.5)
-
   enter.append('text').attr('class', 'node-symbol')
     .attr('text-anchor', 'middle').attr('dominant-baseline', 'central')
-    .attr('fill', '#000').style('pointer-events', 'none')
-
+    .style('pointer-events', 'none')
   enter.append('text').attr('class', 'node-name')
     .attr('text-anchor', 'middle').attr('font-size', 10)
-    .attr('font-family', 'var(--mono)').attr('fill', '#000')
-    .style('pointer-events', 'none')
-
+    .attr('font-family', 'var(--mono)').style('pointer-events', 'none')
   enter.append('text').attr('class', 'node-role')
-    .attr('text-anchor', 'middle').attr('font-size', 9).attr('fill', '#999')
+    .attr('text-anchor', 'middle').attr('font-size', 9)
     .style('pointer-events', 'none')
-
   enter.append('circle').attr('class', 'glow-ring')
     .attr('fill', 'none').attr('stroke', '#000').attr('stroke-width', 2)
     .attr('opacity', 0)
+
+  // Cluster count badge
+  enter.filter(d => d.nodeType === 'cluster').append('text').attr('class', 'cluster-count')
+    .attr('text-anchor', 'middle').attr('dominant-baseline', 'central')
+    .attr('font-size', 11).attr('font-family', 'var(--mono)')
+    .attr('fill', '#666').attr('dy', 16).style('pointer-events', 'none')
 
   enter.call(d3.drag()
     .on('start', (e, d) => { d.fx = d.x; d.fy = d.y })
@@ -217,29 +301,66 @@ function renderGraph(g, nodes, links, selectedAgent, onSelectAgent, rawAgents) {
 
   enter.on('click', (e, d) => {
     e.stopPropagation()
+    if (d.nodeType === 'cluster') {
+      toggleCluster(d.role)
+      return
+    }
     if (d.nodeType === 'tool' || d.nodeType === 'system') return
     const agent = rawAgents?.find(a => a.id === d.id)
     onSelectAgent(selectedAgent?.id === d.id ? null : agent)
   })
 
+  // Update all
   const allNodes = g.selectAll('.node-group')
-  const r = d => d.nodeType === 'tool' ? 12 : d.nodeType === 'system' ? 14 : 8 + Math.min(d.interactions * 2, 16)
 
   allNodes.select('.node-circle')
-    .attr('r', r)
+    .attr('r', nodeRadius)
+    .attr('fill', d => {
+      if (d.nodeType === 'cluster') return 'rgba(0,102,204,0.06)'
+      if (d.nodeType === 'tool') return 'rgba(0,102,204,0.08)'
+      if (d.nodeType === 'system') return '#f0f0f0'
+      return '#fff'
+    })
+    .attr('stroke', d => {
+      if (d.nodeType === 'cluster') return '#0066cc'
+      if (d.nodeType === 'tool') return '#0066cc'
+      return '#999'
+    })
+    .attr('stroke-width', d => d.nodeType === 'cluster' ? 2 : 1.5)
+    .attr('stroke-dasharray', d => d.nodeType === 'cluster' ? '4,2' : 'none')
     .attr('opacity', d => STATUS_OPACITY[d.status] || 1)
 
   allNodes.select('.node-symbol')
-    .text(d => d.nodeType === 'tool' ? '⬡' : (ROLE_SHAPES[d.role] || '○'))
-    .attr('font-size', d => d.nodeType === 'tool' ? 12 : d.nodeType === 'system' ? 14 : 10 + Math.min(d.interactions, 8))
-    .attr('fill', d => d.nodeType === 'tool' ? '#0066cc' : '#000')
+    .text(d => {
+      if (d.nodeType === 'cluster') return ROLE_SHAPES[d.role] || '○'
+      if (d.nodeType === 'tool') return '⬡'
+      return ROLE_SHAPES[d.role] || '○'
+    })
+    .attr('font-size', d => {
+      if (d.nodeType === 'cluster') return 18
+      if (d.nodeType === 'tool') return 12
+      if (d.nodeType === 'system') return 14
+      return 10 + Math.min(d.interactions, 8)
+    })
+    .attr('fill', d => (d.nodeType === 'tool' || d.nodeType === 'cluster') ? '#0066cc' : '#000')
     .attr('opacity', d => STATUS_OPACITY[d.status] || 1)
 
-  allNodes.select('.node-name').text(d => d.name).attr('dy', d => r(d) + 12)
-    .attr('fill', d => d.nodeType === 'tool' ? '#0066cc' : '#000')
-  allNodes.select('.node-role').text(d => d.nodeType === 'tool' ? 'tool' : d.nodeType === 'system' ? 'system' : d.role).attr('dy', d => r(d) + 24)
-    .attr('fill', d => d.nodeType === 'tool' ? '#0066cc' : '#999')
-  allNodes.select('.glow-ring').attr('r', d => r(d) + 4)
+  allNodes.select('.node-name')
+    .text(d => d.name)
+    .attr('dy', d => nodeRadius(d) + 12)
+    .attr('fill', d => (d.nodeType === 'tool' || d.nodeType === 'cluster') ? '#0066cc' : '#000')
+
+  allNodes.select('.node-role')
+    .text(d => {
+      if (d.nodeType === 'cluster') return 'click to expand'
+      if (d.nodeType === 'tool') return 'tool'
+      if (d.nodeType === 'system') return 'system'
+      return d.role
+    })
+    .attr('dy', d => nodeRadius(d) + 24)
+    .attr('fill', d => d.nodeType === 'cluster' ? '#0066cc' : '#999')
+
+  allNodes.select('.glow-ring').attr('r', d => nodeRadius(d) + 4)
 }
 
 function renderTick(g, nodes, links) {
@@ -257,23 +378,33 @@ function updateActivity(g, nodes, activeAgents, activeLinks, selectedAgent) {
   const nodeMap = Object.fromEntries(nodes.map(n => [n.id, n]))
   const selId = selectedAgent?.id
 
+  // For clusters, check if any member is active
+  const isActive = (d) => {
+    if (activeAgents.has(d.id)) return true
+    if (d.nodeType === 'cluster' && d.memberIds)
+      return d.memberIds.some(id => activeAgents.has(id))
+    return false
+  }
+
   g.selectAll('.glow-ring')
-    .attr('opacity', d => activeAgents.has(d.id) ? 1 : 0)
-    .attr('stroke', d => activeAgents.has(d.id) ? '#000' : 'transparent')
+    .attr('opacity', d => isActive(d) ? 1 : 0)
+    .attr('stroke', d => isActive(d) ? '#000' : 'transparent')
 
   g.selectAll('.node-circle')
     .attr('stroke', d => {
       if (selId === d.id) return '#000'
-      if (activeAgents.has(d.id)) return '#000'
+      if (isActive(d)) return '#000'
+      if (d.nodeType === 'cluster') return '#0066cc'
       return '#999'
     })
     .attr('stroke-width', d => {
       if (selId === d.id) return 2.5
-      if (activeAgents.has(d.id)) return 2
+      if (isActive(d)) return 2
+      if (d.nodeType === 'cluster') return 2
       return 1.5
     })
 
-  // Highlight relationship links connected to selected agent
+  // Highlight links connected to selected
   g.selectAll('.link')
     .attr('opacity', d => {
       if (!selId) return 1

@@ -95,9 +95,36 @@ export default function AgentDetail({ agent: agentProp, state, onBack }) {
               <span style={s.fieldValue}>{agent.expertise.join(', ')}</span>
             </Field>
           )}
+          {agent.thematic_profile && Object.keys(agent.thematic_profile).length > 0 && (
+            <Field label="Thematic Affinity">
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {Object.entries(agent.thematic_profile).map(([theme, score]) => (
+                  <span key={theme} style={{
+                    fontSize: 10, padding: '2px 6px', borderRadius: 8,
+                    background: `rgba(0,100,200,${0.08 + score * 0.2})`,
+                    color: 'var(--fg)',
+                  }}>{theme} {(score * 100).toFixed(0)}%</span>
+                ))}
+              </div>
+            </Field>
+          )}
+          {(agent.consecutive_activations >= 3 || agent.inherited_legacy) && (
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
+              {agent.consecutive_activations >= 3 && (
+                <span style={{
+                  fontSize: 10, padding: '2px 8px', borderRadius: 8,
+                  background: 'rgba(200,100,0,0.12)', color: '#a06000',
+                }}>◔ cooldown ({agent.consecutive_activations} in a row)</span>
+              )}
+              {agent.inherited_legacy && (
+                <span style={{
+                  fontSize: 10, padding: '2px 8px', borderRadius: 8,
+                  background: 'rgba(100,0,200,0.08)', color: '#6000a0',
+                }}>◇ carries legacy</span>
+              )}
+            </div>
+          )}
         </div>
-
-        {/* Reputation */}
         <div style={s.section}>
           <div style={s.sectionTitle}>Reputation</div>
           <div style={s.repBar}>

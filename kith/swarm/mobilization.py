@@ -27,6 +27,7 @@ from typing import Any
 from ..agents.caveman import CavemanBackend
 from ..api.events import EventType, event_bus
 from ..config import Config, make_backend
+from ..society.clusters import batch_thematic_affinity
 from ..society.relationships import get_top_allies, get_affinity
 from ..society.state import Agent, Society
 
@@ -101,6 +102,7 @@ class MobilizationEngine:
         prompt: str,
         society: Society,
         executor,
+        store=None,
     ) -> MobilizationResult:
         """
         Run bid phase across all active agents. Returns who should participate.
@@ -121,6 +123,14 @@ class MobilizationEngine:
 
         _emit(EventType.MOBILIZATION_START, {"agent_count": len(active)})
 
+        # Thematic affinity — zero LLM calls, pure vector similarity
+        affinity_map: dict[str, float] = {}
+        if store is not None:
+            try:
+                affinity_map = batch_thematic_affinity(active, prompt, store)
+            except Exception:
+                pass
+
         loop = asyncio.get_event_loop()
         total_tokens = 0
 
@@ -136,6 +146,18 @@ class MobilizationEngine:
 
         bids: list[Bid] = []
         for bid, tokens in results:
+            # Blend LLM bid with thematic affinity: 60% bid + 40% affinity
+            affinity = affinity_map.get(bid.agent_id, 0.0)
+            if affinity > 0:
+                bid.relevance = round(bid.relevance * 0.6 + affinity * 0.4, 3)
+
+            # Attention economy — penalize agents activated too many times in a row
+            agent = next((a for a in active if a.id == bid.agent_id), None)
+            if agent and agent.consecutive_activations >= 3:
+                # Diminishing returns: 15% penalty per consecutive activation beyond 2
+                penalty = min(0.4, (agent.consecutive_activations - 2) * 0.15)
+                bid.relevance = round(max(0.05, bid.relevance - penalty), 3)
+
             bids.append(bid)
             total_tokens += tokens
 

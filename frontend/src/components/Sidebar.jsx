@@ -37,6 +37,7 @@ const EVENT_LABELS = {
 
 export default function Sidebar({ state, events, connected, selectedAgent, onSelectAgent }) {
   const [tab, setTab] = useState('console')
+  const [showConfig, setShowConfig] = useState(false)
 
   const agents = (state?.agents || []).filter(a => a.node_type !== 'system' && a.id !== '__historian__')
   const tools = state?.tools || []
@@ -55,9 +56,21 @@ export default function Sidebar({ state, events, connected, selectedAgent, onSel
       {/* Header */}
       <div style={s.header}>
         <img src="/logo_black.svg" alt="Kith" style={s.logo} />
-        {/* <span style={{ ...s.dot, background: connected ? '#000' : '#ccc' }} /> */}
-        {state && <span style={s.stage}>{state.stage}</span>}
+        <button onClick={() => setShowConfig(c => !c)} style={s.settingsBtn} title="Settings">
+          Settings
+        </button>
       </div>
+      {showConfig && (
+        <div style={s.configOverlay}>
+          <div style={s.configPanel}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1 }}>Settings</span>
+              <button onClick={() => setShowConfig(false)} style={s.closeBtn}>×</button>
+            </div>
+            <ConfigPanel />
+          </div>
+        </div>
+      )}
 
       {/* Stats */}
       {state && (
@@ -71,7 +84,7 @@ export default function Sidebar({ state, events, connected, selectedAgent, onSel
 
       {/* Tabs */}
       <div style={s.tabs}>
-        {['console', 'entities', 'memory', 'config'].map(t => (
+        {['console', 'entities', 'memory', 'tools'].map(t => (
           <button key={t} onClick={() => setTab(t)}
             style={{ ...s.tab, ...(tab === t ? s.tabActive : {}) }}>
             {t}
@@ -82,9 +95,9 @@ export default function Sidebar({ state, events, connected, selectedAgent, onSel
       {/* Content */}
       <div style={s.content}>
         {tab === 'console' && <ConsoleTab events={events} />}
-        {tab === 'entities' && <EntitiesTab agents={agents} tools={tools} onSelectAgent={onSelectAgent} />}
+        {tab === 'entities' && <EntitiesTab agents={agents} onSelectAgent={onSelectAgent} />}
         {tab === 'memory' && <MemoryTab state={state} />}
-        {tab === 'config' && <div style={s.scrollable}><ConfigPanel /></div>}
+        {tab === 'tools' && <ToolsTab tools={tools} />}
       </div>
     </aside>
   )
@@ -152,54 +165,61 @@ function ConsoleTab({ events }) {
 // ---------------------------------------------------------------------------
 // Entities — agents + tools merged
 // ---------------------------------------------------------------------------
-function EntitiesTab({ agents, tools, onSelectAgent }) {
+function EntitiesTab({ agents, onSelectAgent }) {
   return (
     <div style={s.scrollable}>
-      {/* Agents */}
-      {agents.length > 0 && (
-        <>
-          <div style={s.entityGroupLabel}>Agents</div>
-          {agents.map(a => (
-            <div key={a.id} onClick={() => onSelectAgent(a)}
-              onMouseEnter={e => e.currentTarget.style.background = 'var(--surface)'}
-              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-              style={{ ...s.entityRow, opacity: a.status === 'active' ? 1 : 0.35 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={s.entityName}>{a.name}</span>
-                <span style={s.entityBadge}>{a.role || '--'}</span>
-              </div>
-              <div style={s.entityMeta}>
-                {a.interaction_count} interactions
-                {a.reputation != null && ` / ${(a.reputation * 100).toFixed(0)}% rep`}
-                {a.supervisor_id ? ' / supervised' : ''}
-              </div>
-            </div>
-          ))}
-        </>
+      {agents.length > 0 ? agents.map(a => (
+        <div key={a.id} onClick={() => onSelectAgent(a)}
+          onMouseEnter={e => e.currentTarget.style.background = 'var(--surface)'}
+          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+          style={{ ...s.entityRow, opacity: a.status === 'active' ? 1 : 0.35 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={s.entityName}>{a.name}</span>
+            <span style={s.entityBadge}>{a.role || '--'}</span>
+          </div>
+          <div style={s.entityMeta}>
+            {a.interaction_count} interactions
+            {a.reputation != null && ` / ${(a.reputation * 100).toFixed(0)}% rep`}
+            {a.supervisor_id ? ' / supervised' : ''}
+          </div>
+        </div>
+      )) : (
+        <div style={s.muted}>no agents yet</div>
       )}
+    </div>
+  )
+}
 
-      {/* Tools */}
-      {tools.length > 0 && (
-        <>
-          <div style={{ ...s.entityGroupLabel, marginTop: 16 }}>Tools</div>
-          {tools.map(t => (
-            <div key={t.id} style={s.entityRow}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={s.entityName}>{t.name}</span>
-                <span style={{ ...s.entityBadge, fontSize: 9 }}>tool</span>
-              </div>
-              <div style={s.entityMeta}>{t.description}</div>
-              <div style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--mono)', marginTop: 2 }}>
-                used {t.usage_count} times
-              </div>
+// ---------------------------------------------------------------------------
+// Tools — dedicated tab with full detail
+// ---------------------------------------------------------------------------
+function ToolsTab({ tools }) {
+  return (
+    <div style={s.scrollable}>
+      {tools.length === 0 && (
+        <div style={s.muted}>No tools yet. The Tool Smith proposes tools as the society identifies needs.</div>
+      )}
+      {tools.map(t => (
+        <div key={t.id} style={s.toolCard}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={s.entityName}>{t.name}</span>
+            <span style={s.toolUsage}>{t.usage_count}x</span>
+          </div>
+          <div style={s.entityMeta}>{t.description}</div>
+          {t.parameters && Object.keys(t.parameters).length > 0 && (
+            <div style={s.toolParams}>
+              {Object.entries(t.parameters).map(([k, v]) => (
+                <span key={k} style={s.toolParam}>{k}: {typeof v === 'string' ? v : JSON.stringify(v)}</span>
+              ))}
             </div>
-          ))}
-        </>
-      )}
-
-      {agents.length === 0 && tools.length === 0 && (
-        <div style={s.muted}>no entities yet</div>
-      )}
+          )}
+          {t.created_at && (
+            <div style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--mono)', marginTop: 4 }}>
+              proposed {new Date(t.created_at).toLocaleDateString()}
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   )
 }
@@ -244,7 +264,20 @@ function MemoryTab({ state }) {
         {policies.length === 0 && <div style={s.muted}>No policies yet. Policies emerge as the society encounters problems.</div>}
         {policies.map(p => (
           <div key={p.id} style={s.policyRow}>
-            <div style={s.policyName}>{p.name}</div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={s.policyName}>{p.name}</div>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <span style={{
+                  fontSize: 9, fontFamily: 'var(--mono)', padding: '1px 5px',
+                  border: '1px solid var(--border)', borderRadius: 3, color: 'var(--muted)',
+                }}>{p.source || 'organic'}</span>
+                {p.effectiveness != null && (
+                  <span style={{
+                    fontSize: 9, fontFamily: 'var(--mono)', color: p.effectiveness > 0.5 ? '#0a7' : '#c44',
+                  }}>{(p.effectiveness * 100).toFixed(0)}%</span>
+                )}
+              </div>
+            </div>
             <div style={s.policyRule}>{p.rule}</div>
           </div>
         ))}
@@ -321,6 +354,7 @@ const s = {
     width: 'var(--sidebar-w)', minWidth: 'var(--sidebar-w)',
     borderRight: '1px solid var(--border)', display: 'flex',
     flexDirection: 'column', height: '100vh', overflow: 'hidden',
+    position: 'relative',
   },
   header: {
     padding: '16px 16px 12px', display: 'flex', alignItems: 'center',
@@ -329,6 +363,22 @@ const s = {
   logo: { height: 20 },
   dot: { width: 6, height: 6, borderRadius: '50%', flexShrink: 0 },
   stage: { fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--muted)', marginLeft: 'auto', textTransform: 'uppercase', letterSpacing: 1 },
+  settingsBtn: {
+    marginLeft: 'auto', background: 'none', border: 'none',
+    padding: 0, cursor: 'pointer', color: 'var(--muted)',
+    fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 0.5,
+    textTransform: 'uppercase',
+  },
+  configOverlay: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    background: 'var(--bg)', zIndex: 300,
+    display: 'flex', flexDirection: 'column', overflow: 'auto',
+  },
+  configPanel: { padding: 16, flex: 1 },
+  closeBtn: {
+    background: 'none', border: 'none', fontSize: 18, cursor: 'pointer',
+    color: 'var(--muted)', padding: '0 4px', lineHeight: 1,
+  },
   stats: { display: 'flex', padding: '10px 16px', gap: 16, borderBottom: '1px solid var(--border)', flexShrink: 0 },
   stat: { display: 'flex', flexDirection: 'column', alignItems: 'center', flex: 1 },
   statValue: { fontFamily: 'var(--mono)', fontWeight: 600, fontSize: 16 },
@@ -403,6 +453,22 @@ const s = {
     padding: '2px 6px', border: '1px solid var(--border)', borderRadius: 3,
   },
   entityMeta: { fontSize: 11, color: 'var(--muted)', marginTop: 2 },
+
+  // Tools tab
+  toolCard: {
+    padding: '12px 12px', borderBottom: '1px solid var(--border)',
+  },
+  toolUsage: {
+    fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--muted)',
+    padding: '2px 6px', border: '1px solid var(--border)', borderRadius: 3,
+  },
+  toolParams: {
+    display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6,
+  },
+  toolParam: {
+    fontSize: 10, fontFamily: 'var(--mono)', padding: '2px 6px',
+    background: 'var(--surface)', borderRadius: 3, color: 'var(--fg)',
+  },
 
   // Memory tab
   memSection: { padding: '14px 0', borderBottom: '1px solid var(--border)' },

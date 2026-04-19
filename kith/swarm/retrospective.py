@@ -157,37 +157,38 @@ class RetrospectiveEngine:
         society: Society,
         report: RetrospectiveReport,
     ) -> list[str]:
-        """Convert proposed actions into concrete society changes."""
+        """
+        Evaluate proposed actions. The retrospective does NOT create policies
+        directly — it proposes them. Proposals are evaluated through the
+        governance module which enforces caps and effectiveness tracking.
+        """
+        from ..society.governance import add_policy, can_add_policy
+
         actions_taken: list[str] = []
         existing_policy_names = {p.name for p in society.policies.values()}
 
         for proposal in proposals:
             proposal_lower = proposal.lower()
 
-            # Pattern: proposal suggests a new policy/rule
-            if any(kw in proposal_lower for kw in ["policy", "rule", "require", "enforce", "mandate"]):
-                name = f"Retrospective: {proposal[:40]}"
+            # Only create a policy if it's a clear governance proposal AND there's room
+            is_governance = any(kw in proposal_lower for kw in ["require", "enforce", "mandate", "must", "always"])
+
+            if is_governance and can_add_policy(society):
+                name = f"Retro: {proposal[:35]}"
                 if name not in existing_policy_names:
-                    policy = SocietyPolicy(name=name, rule=proposal)
-                    society.policies[policy.id] = policy
-                    actions_taken.append(f"Policy created: {name}")
+                    policy = SocietyPolicy(
+                        name=name, rule=proposal,
+                        source="retrospective",
+                        effectiveness_score=0.4,  # starts lower than organic — must prove value
+                    )
+                    added = add_policy(society, policy)
+                    if added:
+                        actions_taken.append(f"Policy proposed and accepted: {name}")
+                    else:
+                        actions_taken.append(f"Policy proposed but rejected (cap reached, existing policies stronger): {proposal[:50]}")
                     existing_policy_names.add(name)
-
-            # Pattern: proposal suggests focusing on quality
-            elif any(kw in proposal_lower for kw in ["review", "quality", "check", "verify"]):
-                name = "Retrospective: Quality Focus"
-                if name not in existing_policy_names:
-                    policy = SocietyPolicy(name=name, rule=proposal)
-                    society.policies[policy.id] = policy
-                    actions_taken.append(f"Policy created: {name}")
-                    existing_policy_names.add(name)
-
-            # Pattern: proposal about agent performance
-            elif any(kw in proposal_lower for kw in ["agent", "role", "reassign", "train"]):
-                actions_taken.append(f"Noted for evolution: {proposal[:60]}")
-
             else:
-                actions_taken.append(f"Acknowledged: {proposal[:60]}")
+                actions_taken.append(f"Noted: {proposal[:60]}")
 
         return actions_taken
 

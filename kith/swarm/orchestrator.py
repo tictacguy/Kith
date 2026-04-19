@@ -9,6 +9,7 @@ from ..api.events import EventType, event_bus
 from ..config import Config, make_backend
 from ..society.evolution import EvolutionEngine
 from ..society.historian import Historian
+from ..society.clusters import update_thematic_profiles
 from ..society.state import (
     Agent, AgentStatus, EvolutionStage, Interaction, Society, SocietyPolicy, ToolSpec,
 )
@@ -72,6 +73,9 @@ class Orchestrator:
                     "debates_lost": a.debates_lost,
                     "delegations_received": a.delegations_received,
                     "reputation_log": a.reputation_log[-10:],  # last 10 events
+                    "thematic_profile": dict(sorted(a.thematic_profile.items(), key=lambda x: -x[1])[:8]) if a.thematic_profile else {},
+                    "consecutive_activations": a.consecutive_activations,
+                    "inherited_legacy": bool(a.inherited_legacy),
                 }
                 for a in s.agents.values()
             ] + [
@@ -90,11 +94,14 @@ class Orchestrator:
                 for r in s.roles.values()
             ],
             "tools": [
-                {"id": t.id, "name": t.name, "description": t.description, "usage_count": t.usage_count}
+                {"id": t.id, "name": t.name, "description": t.description,
+                 "usage_count": t.usage_count, "parameters": t.parameters,
+                 "created_at": t.created_at.isoformat() if t.created_at else None}
                 for t in s.tools.values()
             ],
             "policies": [
-                {"id": p.id, "name": p.name, "rule": p.rule, "active": p.active}
+                {"id": p.id, "name": p.name, "rule": p.rule, "active": p.active,
+                 "source": p.source, "effectiveness": round(p.effectiveness_score, 2)}
                 for p in s.policies.values()
             ],
             "last_retrospective": s.last_retrospective or None,
@@ -179,14 +186,20 @@ class Orchestrator:
         relevant_facts = Historian.retrieve_relevant_context(user_prompt, self._store, n=8)
         relevant_memory = relevant_facts
 
+        # 1b. FRAMING — identify decision dimensions before agents respond
+        framing = await self._frame_decision(user_prompt, society)
+
         # 2. Mobilize — distributed bid phase, agents self-select
-        mob_result = await self._mobilization.mobilize(user_prompt, society, self._executor)
+        mob_result = await self._mobilization.mobilize(user_prompt, society, self._executor, store=self._store)
         selected_agents = self._build_agents(society, mob_result.activated_ids)
         selected_ids = mob_result.activated_ids
         mob_level = mob_result.level
 
-        # 3. Run agents — emit thinking/responded per agent
-        token_map = await self._run_agents_with_events(selected_agents, user_prompt, society, relevant_memory)
+        # 3. Run agents — each gets the framing + their assigned focus
+        framed_memory = relevant_memory
+        if framing:
+            framed_memory = [f"Decision dimensions: {framing}"] + relevant_memory
+        token_map = await self._run_agents_with_events(selected_agents, user_prompt, society, framed_memory)
 
         # 3b. Tool execution
         tool_results_ctx = await self._execute_tools(society)
@@ -246,10 +259,17 @@ class Orchestrator:
         approved = [s for s in supervised if s.supervisor_verdict != "vetoed"]
         approved_responses = {s.agent_id: s.final_response for s in approved}
 
-        # 6. Synthesis — uses consensus position as primary input
+        # 6. RED TEAM — Critic reviews the emerging position for flaws
+        red_team_note = ""
+        if mob_level in ("team", "council"):
+            red_team_note = await self._red_team(
+                delib_result.consensus_position, user_prompt, society, self._executor
+            )
+
+        # 7. Synthesis — uses consensus position + red team as inputs
         self._emit(EventType.SYNTHESIS_START, {"agent_ids": selected_ids})
         final_response = await self._synthesize_with_consensus(
-            approved_responses, user_prompt, society, delib_result
+            approved_responses, user_prompt, society, delib_result, red_team_note
         )
         self._emit(EventType.SYNTHESIS_END, {"response_length": len(final_response)})
 
@@ -306,14 +326,32 @@ class Orchestrator:
         # 10. Record relationships — co-participation
         record_co_participation(society, selected_ids)
 
-        # 11. Persist
+        # 10b. Update thematic profiles — agents who participated build affinity
+        quality_scores = {}
+        for s in supervised:
+            if s.agent_id in society.agents:
+                a = society.agents[s.agent_id]
+                quality_scores[s.agent_id] = a.reputation
+                if s.supervisor_verdict == "vetoed":
+                    quality_scores[s.agent_id] *= 0.3
+        update_thematic_profiles(society, selected_ids, interaction.themes, quality_scores)
+
+        # 11. Persist + attention economy tracking
         await self._store.save_interaction(interaction)
         society.total_interactions += 1
+        selected_set = set(selected_ids)
         for ka in selected_agents:
             ka.agent.interaction_count += 1
+            # Attention economy: track consecutive activations
+            ka.agent.consecutive_activations += 1
+            ka.agent.recent_themes = (interaction.themes[:3] + ka.agent.recent_themes)[:6]
             await self._store.upsert_agent(ka.agent)
         for a in all_active:
-            if a.id not in set(selected_ids):
+            if a.id not in selected_set:
+                # Reset consecutive counter for non-participants
+                if a.consecutive_activations > 0:
+                    a.consecutive_activations = 0
+                    a.recent_themes = []
                 await self._store.upsert_agent(a)
 
         # 12. Reputation lifecycle — retire/demote/promote based on scores
@@ -322,8 +360,12 @@ class Orchestrator:
             update_reputation(agent)
             action = check_lifecycle(agent, society)
             if action == "retire":
+                # Transfer legacy before retiring
+                legacy_msg = self._evolution.transfer_legacy(agent, society)
                 agent.status = AgentStatus.RETIRED
                 lifecycle_log.append(f"Retired {agent.name} (rep: {agent.reputation:.2f})")
+                if legacy_msg:
+                    lifecycle_log.append(legacy_msg)
             elif action and action.startswith("demote:"):
                 target = action.split(":", 1)[1]
                 agent.previous_role_id = agent.role_id
@@ -355,10 +397,13 @@ class Orchestrator:
         if has_tool_smith and society.total_interactions > 0 and society.total_interactions % 5 == 0:
             try:
                 proposals = await self.propose_tools()
+                tool_log = []
                 for spec in proposals:
                     society.tools[spec.id] = spec
                     await self._store.upsert_tool(spec)
-                    self._emit(EventType.TOOL_CALLED, {"tool_name": spec.name, "success": True})
+                    tool_log.append(f"Tool proposed: {spec.name} — {spec.description[:60]}")
+                if tool_log:
+                    self._emit(EventType.SOCIETY_EVOLVED, {"changelog": tool_log})
             except Exception:
                 pass  # tool proposal is best-effort
 
@@ -470,6 +515,7 @@ class Orchestrator:
             self._emit(EventType.TOOL_CALLED, {"tool_name": r.tool_name, "success": r.success})
             if r.success and r.tool_id and r.tool_id in society.tools:
                 society.tools[r.tool_id].usage_count += 1
+                await self._store.upsert_tool(society.tools[r.tool_id])
         return format_tool_results(results)
 
     # -----------------------------------------------------------------------
@@ -521,6 +567,66 @@ class Orchestrator:
             KithAgent(agent=a, role=society.roles.get(a.role_id) if a.role_id else None, cfg=self._cfg, policy=policy)
             for a in agents_to_use
         ]
+
+    # -----------------------------------------------------------------------
+    # Decision framing — decompose question into dimensions
+    # -----------------------------------------------------------------------
+
+    async def _frame_decision(self, user_prompt: str, society) -> str:
+        """Identify the key dimensions of a decision. Single cheap LLM call."""
+        prompt = (
+            f"Identify 2-4 key dimensions of this decision in a comma-separated list. "
+            f"Each dimension is one word or short phrase (e.g. 'cost, risk, timeline, culture').\n"
+            f"If this is a simple factual question, reply: SIMPLE\n\n"
+            f"Question: {user_prompt}\n\nDimensions:"
+        )
+        loop = asyncio.get_event_loop()
+        from ..agents.caveman import CavemanBackend
+        backend = CavemanBackend(make_backend(self._cfg), intensity="ultra")
+        result = await loop.run_in_executor(
+            self._executor,
+            lambda: backend.generate([{"role": "user", "content": prompt}]),
+        )
+        text = result.get("content", "").strip()
+        if "SIMPLE" in text.upper():
+            return ""
+        return text
+
+    # -----------------------------------------------------------------------
+    # Red team — Critic reviews emerging position for flaws
+    # -----------------------------------------------------------------------
+
+    async def _red_team(self, consensus_position: str, user_prompt: str, society, executor) -> str:
+        """Critic (or highest-rep agent) stress-tests the emerging consensus."""
+        if not consensus_position:
+            return ""
+        # Find a Critic, or fall back to any active agent
+        critic = next(
+            (a for a in society.active_agents if a.role_id == "role_critic"),
+            None,
+        )
+        if not critic:
+            return ""
+
+        prompt = (
+            f"You are {critic.name}, the society's red team. "
+            f"The society is about to recommend this position:\n\n"
+            f"{consensus_position[:500]}\n\n"
+            f"Original question: {user_prompt}\n\n"
+            f"Find 1-3 specific flaws, blind spots, or risks in this recommendation. "
+            f"Be concrete. If the position is solid, say: NO MAJOR FLAWS."
+        )
+        from ..agents.caveman import CavemanBackend
+        backend = CavemanBackend(make_backend(self._cfg), intensity="full")
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            executor,
+            lambda: backend.generate([{"role": "user", "content": prompt}]),
+        )
+        text = result.get("content", "").strip()
+        if "NO MAJOR FLAWS" in text.upper():
+            return ""
+        return text
 
     # -----------------------------------------------------------------------
     # Raw LLM call (no caveman — for user-facing output)
@@ -579,10 +685,10 @@ class Orchestrator:
         content, _ = await loop.run_in_executor(self._executor, self._raw_call_sync, synthesis_prompt)
         return content
 
-    async def _synthesize_with_consensus(self, responses, prompt, society, delib_result):
+    async def _synthesize_with_consensus(self, responses, prompt, society, delib_result, red_team_note=""):
         if not responses:
             return "No approved responses from society."
-        if len(responses) == 1 and not delib_result.debates:
+        if len(responses) == 1 and not delib_result.debates and not red_team_note:
             raw = next(iter(responses.values()))
             rewrite_prompt = (
                 f"Original question: {prompt}\n\n"
@@ -595,31 +701,49 @@ class Orchestrator:
 
         debate_ctx = ""
         if delib_result.debates:
-            debate_ctx = "\nDebates resolved:\n" + "\n".join(
-                f"  {d['agent_a']} vs {d['agent_b']}: {d['resolution']}" for d in delib_result.debates
+            debate_ctx = "\nDebates:\n" + "\n".join(
+                f"  {d['agent_a']} challenged {d['agent_b']}: {d['resolution']}" for d in delib_result.debates
             )
-        delegation_ctx = ""
-        if delib_result.delegations:
-            delegation_ctx = "\nDelegation results:\n" + "\n".join(
-                f"  {d['from_name']} delegated to {d['to_name']}: {d.get('result', '')}" for d in delib_result.delegations
-            )
+
         votes = delib_result.consensus
         agree = sum(1 for v in votes.values() if v == "agree")
         disagree = sum(1 for v in votes.values() if v == "disagree")
-        vote_ctx = f"\nConsensus: {agree} agree, {disagree} disagree, {len(votes) - agree - disagree} abstain."
+        total = len(votes)
+        unanimous = disagree == 0 and total > 1
+        convergence_ctx = (
+            f"\nConvergence: {agree}/{total} aligned, {disagree}/{total} dissenting."
+            f"{' UNANIMOUS.' if unanimous else ''}"
+        )
+
+        # Name who dissented
+        dissenters = [
+            society.agents[aid].name if aid in society.agents else aid
+            for aid, v in votes.items() if v == "disagree"
+        ]
+        if dissenters:
+            convergence_ctx += f" Dissenting: {', '.join(dissenters)}."
+
+        red_team_ctx = ""
+        if red_team_note:
+            red_team_ctx = f"\nRed team (Critic) identified these risks/flaws:\n{red_team_note}\n"
 
         positions = "\n\n".join(
-            f"[{society.agents[aid].name if aid in society.agents else aid}] (voted {votes.get(aid, '?')}): {resp}"
+            f"[{society.agents[aid].name if aid in society.agents else aid}] ({'aligned' if votes.get(aid) == 'agree' else 'dissenting'}): {resp}"
             for aid, resp in responses.items()
         )
 
         synthesis_prompt = (
             f"Original question: {prompt}\n\n"
-            f"Internal agent positions after deliberation (compressed notation):\n{positions}\n"
-            f"{debate_ctx}{delegation_ctx}{vote_ctx}\n\n"
+            f"Agent positions after deliberation (compressed):\n{positions}\n"
+            f"{debate_ctx}{convergence_ctx}{red_team_ctx}\n"
             f"Consensus position: {delib_result.consensus_position}\n\n"
-            f"Synthesize all of the above into a single, clear, well-written answer for the end user. "
-            f"Weight the consensus position heavily."
+            f"Synthesize into a clear answer for the end user. Structure:\n"
+            f"1. The recommendation\n"
+            f"2. Key reasoning\n"
+            f"3. How the society reached this conclusion: who contributed what, "
+            f"whether consensus was unanimous or contested, and any debates that occurred\n"
+            f"4. If there were dissenting views or red team concerns, include a "
+            f"'Risks and caveats' section naming who raised them and why"
         )
         loop = asyncio.get_event_loop()
         content, _ = await loop.run_in_executor(self._executor, self._raw_call_sync, synthesis_prompt)
@@ -677,11 +801,18 @@ class Orchestrator:
         return p
 
     async def add_policy(self, name, rule, applies_to_roles=None):
+        from ..society.governance import add_policy as gov_add
         society = self._society
         if society is None:
             raise ValueError("Society not initialized")
-        p = SocietyPolicy(name=name, rule=rule, applies_to_roles=applies_to_roles or [])
-        society.policies[p.id] = p
+        p = SocietyPolicy(
+            name=name, rule=rule, source="manual",
+            applies_to_roles=applies_to_roles or [],
+            effectiveness_score=0.7,  # manual policies start strong
+        )
+        added = gov_add(society, p)
+        if not added:
+            raise ValueError(f"Policy cap reached ({len(society.active_policies)} active). Deactivate an existing policy first.")
         await self._store.upsert_policy(p)
         await self._store.save_society(society)
         self.broadcast_state()
